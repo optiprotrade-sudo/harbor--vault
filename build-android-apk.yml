@@ -1,0 +1,50 @@
+name: Build Harbor Vault Android APK
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out wallet project
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install Flutter on build runner
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Create Android application files
+        run: flutter create --project-name harbor_vault --org com.harborvault --platforms android --no-pub .
+
+      - name: Apply Android-only safety and network settings
+        run: python3 scripts/prepare_android.py
+
+      - name: Resolve Dart dependencies
+        run: flutter pub get
+
+      - name: Run wallet tests (stop build if they fail)
+        run: flutter test
+
+      - name: Build test APK (not security audited)
+        run: flutter build apk --release
+
+      - name: Upload downloadable APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Harbor-Vault-Android-APK-v0.1
+          path: build/app/outputs/flutter-apk/app-release.apk
+          if-no-files-found: error
+          retention-days: 30
