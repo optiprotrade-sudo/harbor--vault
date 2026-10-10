@@ -1,8 +1,12 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import 'models/asset.dart';
 import 'services/balance_service.dart';
+import 'services/price_service.dart';
+import 'services/portfolio_summary.dart';
 import 'services/vault_storage.dart';
 import 'services/wallet_engine.dart';
 
@@ -60,9 +64,10 @@ class VaultScreen extends StatefulWidget {
   State<VaultScreen> createState() => _VaultScreenState();
 }
 
-class _VaultScreenState extends State<VaultScreen> {
+class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
   final _storage = VaultStorage();
   final _balanceService = BalanceService();
+  final _priceService = PriceService();
   final _word3 = TextEditingController();
   final _word9 = TextEditingController();
   final _importText = TextEditingController();
@@ -72,6 +77,14 @@ class _VaultScreenState extends State<VaultScreen> {
   String? _error;
   bool _saving = false;
   bool _refreshing = false;
+  bool _foreground = true;
+  bool _balancesVisible = true;
+  DateTime? _lastChecked;
+  String? _priceError;
+  Timer? _autoRefreshTimer;
+  final Set<ChainAsset> _expandedAssets = {};
+  final Map<ChainAsset, double> _usdPrices = {};
+  int _refreshVersion = 0;
   int _tab = 0;
   ChainAsset _selected = ChainAsset.btc;
   final Map<ChainAsset, String> _balances = {};
@@ -80,15 +93,35 @@ class _VaultScreenState extends State<VaultScreen> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _autoRefreshTimer = Timer.periodic(const Duration(minutes: 5), (_) {
+      if (mounted && _foreground && _page == _Page.wallet) _refresh();
+    });
     _boot();
   }
 
   @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    final wasForeground = _foreground;
+    _foreground = state == AppLifecycleState.resumed;
+    if (!wasForeground && _foreground && _page == _Page.wallet) _refresh();
+  }
+
+  void _scheduleFirstCheck() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && _page == _Page.wallet) _refresh();
+    });
+  }
+
+  @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _autoRefreshTimer?.cancel();
     _word3.dispose();
     _word9.dispose();
     _importText.dispose();
     _balanceService.dispose();
+    _priceService.dispose();
     super.dispose();
   }
 
@@ -104,6 +137,7 @@ class _VaultScreenState extends State<VaultScreen> {
           _addresses = derived;
           _page = _Page.wallet;
         });
+        _scheduleFirstCheck();
       }
     } catch (e) {
       if (mounted) setState(() {
@@ -164,7 +198,14 @@ class _VaultScreenState extends State<VaultScreen> {
         _pendingMnemonic = null;
         _balances.clear();
         _balanceErrors.clear();
+        _usdPrices.clear();
+        _lastChecked = null;
+        _priceError = null;
+        _refreshVersion++;
+        _refreshing = false;
+        _expandedAssets.clear();
       });
+      _scheduleFirstCheck();
       _snack('Wallet saved in device encrypted storage.');
     } catch (e) {
       if (mounted) _snack('Could not save the wallet: $e');
@@ -174,24 +215,62 @@ class _VaultScreenState extends State<VaultScreen> {
   }
 
   Future<void> _refresh() async {
-    if (_refreshing || _addresses == null) return;
+    if (_refreshing || _addresses == null || _page != _Page.wallet) return;
+    final addresses = _addresses!;
+    final version = ++_refreshVersion;
     setState(() {
       _refreshing = true;
       _balanceErrors.clear();
+      _balances.clear(); // Never pass cached values off as fresh.
+      _usdPrices.clear();
+      _priceError = null;
     });
-    // Only public addresses are sent to third-party providers.
-    await Future.wait([ChainAsset.btc, ChainAsset.eth, ChainAsset.usdt].map((asset) async {
-      try {
-        final value = await _balanceService.fetch(asset, _addresses!.of(asset));
-        if (mounted) setState(() => _balances[asset] = value);
-      } catch (e) {
-        if (mounted) setState(() {
-          _balances.remove(asset); // Never show stale values as current.
-          _balanceErrors[asset] = '$e';
-        });
+
+    // Only public receiving addresses go to block explorers. The pricing
+    // endpoint receives no wallet address, seed phrase or private key.
+    final requests = <Future<void>>[
+      ...ChainAsset.values.map((asset) async {
+        try {
+          final value = await _balanceService.fetch(asset, addresses.of(asset));
+          if (mounted && _page == _Page.wallet && version == _refreshVersion) {
+            setState(() => _balances[asset] = value);
+          }
+        } catch (_) {
+          if (mounted && _page == _Page.wallet && version == _refreshVersion) {
+            setState(() => _balanceErrors[asset] = 'Provider unavailable');
+          }
+        }
+      }),
+      _loadPrices(version),
+    ];
+    await Future.wait(requests);
+    if (mounted && _page == _Page.wallet && version == _refreshVersion) {
+      setState(() {
+        _lastChecked = DateTime.now();
+        _refreshing = false;
+      });
+    }
+  }
+
+  Future<void> _loadPrices(int version) async {
+    try {
+      final prices = await _priceService.fetchUsd();
+      if (mounted && _page == _Page.wallet && version == _refreshVersion) {
+        setState(() => _usdPrices.addAll(prices));
       }
-    }));
-    if (mounted) setState(() => _refreshing = false);
+    } catch (_) {
+      if (mounted && _page == _Page.wallet && version == _refreshVersion) {
+        setState(() => _priceError = 'USD pricing unavailable');
+      }
+    }
+  }
+
+  String _checkedLabel() {
+    if (_refreshing) return 'Checking public networks and USD quotes…';
+    final last = _lastChecked;
+    if (last == null) return 'Not checked yet';
+    final localTime = '${last.hour.toString().padLeft(2, '0')}:${last.minute.toString().padLeft(2, '0')}';
+    return 'Last checked $localTime · Refreshes every 5 min while open';
   }
 
   Future<void> _copyAddress(ChainAsset asset) async {
@@ -273,6 +352,12 @@ class _VaultScreenState extends State<VaultScreen> {
         _addresses = null;
         _balances.clear();
         _balanceErrors.clear();
+        _usdPrices.clear();
+        _lastChecked = null;
+        _priceError = null;
+        _refreshVersion++;
+        _refreshing = false;
+        _expandedAssets.clear();
         _page = _Page.welcome;
         _tab = 0;
         _selected = ChainAsset.btc;
@@ -300,7 +385,7 @@ class _VaultScreenState extends State<VaultScreen> {
         actions: [
           if (wallet)
             const Padding(padding: EdgeInsets.only(right: 12), child: Center(
-              child: Text('SELF-CUSTODY  •  v0.1', style: TextStyle(fontSize: 10, color: _muted)))),
+              child: Text('SELF-CUSTODY  •  v0.6', style: TextStyle(fontSize: 10, color: _muted)))),
         ],
       ),
       body: wallet
@@ -361,7 +446,7 @@ class _VaultScreenState extends State<VaultScreen> {
       const SizedBox(height: 12),
       OutlinedButton.icon(onPressed: () => setState(() => _page = _Page.restore), icon: const Icon(Icons.restore), label: const Text('Restore with recovery words'), style: OutlinedButton.styleFrom(minimumSize: const Size.fromHeight(52))),
       const SizedBox(height: 25),
-      const Text('Nothing is sent to our server. Internet access is used only if you tap Refresh balances.', style: TextStyle(color: _muted, fontSize: 12)),
+      const Text('While the wallet is open, public receiving addresses are checked on launch and about every five minutes. USD prices come from a separate public provider. Recovery words are never sent.', style: TextStyle(color: _muted, fontSize: 12)),
     ]);
     if (_page == _Page.restore) return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
       TextButton.icon(onPressed: () => setState(() => _page = _Page.welcome), icon: const Icon(Icons.arrow_back), label: const Text('Back')),
@@ -418,85 +503,194 @@ class _VaultScreenState extends State<VaultScreen> {
   }
 
   Widget _assetsView() {
+    final estimate = PortfolioSummary.calculate(_balances, _usdPrices);
     final width = MediaQuery.sizeOf(context).width;
+    final shownUsd = _balancesVisible
+        ? PortfolioSummary.formatUsd(estimate.usd)
+        : '••••••';
+    final coverage = estimate.usd == null
+        ? _priceError ?? 'Waiting for balance and USD price checks'
+        : estimate.complete
+            ? 'Estimate for all 4 listed addresses'
+            : 'Partial estimate · ${estimate.counted} of ${estimate.total} assets priced';
+
     return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      _pill('MAINNET ADDRESSES · RECEIVE-ONLY BUILD'),
-      const SizedBox(height: 16),
-      const Text('My assets', style: TextStyle(fontSize: 34, fontWeight: FontWeight.w900)),
-      const SizedBox(height: 7),
-      const Text('Balances are unavailable until you request a public network check.', style: TextStyle(color: _muted)),
-      const SizedBox(height: 22),
-      Container(width: double.infinity, padding: const EdgeInsets.all(23),
-        decoration: BoxDecoration(
-          gradient: const LinearGradient(colors: [Color(0xFF183E3C), Color(0xFF122B36)]),
-          borderRadius: BorderRadius.circular(22)),
-        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          const Icon(Icons.shield_outlined, color: _mint, size: 32),
-          const SizedBox(height: 18),
-          const Text('100% YOUR KEYS', style: TextStyle(fontSize: 13, color: _mint, fontWeight: FontWeight.w800, letterSpacing: 1.3)),
-          const SizedBox(height: 6),
-          const Text('No exchange. No bank. No custodial account.', style: TextStyle(fontSize: 19, fontWeight: FontWeight.w700)),
-          const SizedBox(height: 8),
-          const Text('Your recovery words stay encrypted on this device. Funds are on their blockchains, not inside this app.', style: TextStyle(fontSize: 12, color: _muted)),
-        ])),
-      const SizedBox(height: 18),
-      Row(children: [
-        Expanded(child: OutlinedButton.icon(onPressed: _refreshing ? null : _refresh,
-          icon: _refreshing ? const SizedBox(height: 16, width: 16, child: CircularProgressIndicator(strokeWidth: 2)) : const Icon(Icons.sync),
-          label: Text(_refreshing ? 'Checking…' : 'Refresh balances'),
-          style: OutlinedButton.styleFrom(minimumSize: const Size.fromHeight(48)))),
-        const SizedBox(width: 12),
-        Expanded(child: OutlinedButton.icon(onPressed: () => setState(() => _tab = 1),
-          icon: const Icon(Icons.qr_code), label: const Text('Receive'),
-          style: OutlinedButton.styleFrom(minimumSize: const Size.fromHeight(48)))),
+      Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+        const Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text('My wallet', style: TextStyle(fontSize: 26, fontWeight: FontWeight.w900)),
+          SizedBox(height: 4),
+          Text('Mainnet · First receiving address only',
+            style: TextStyle(color: _muted, fontSize: 11)),
+        ]),
+        const Icon(Icons.account_balance_wallet_outlined, color: _mint),
       ]),
+      const SizedBox(height: 17),
+      Container(
+        width: double.infinity,
+        padding: const EdgeInsets.fromLTRB(20, 20, 20, 18),
+        decoration: BoxDecoration(
+          gradient: const LinearGradient(
+            begin: Alignment.topLeft, end: Alignment.bottomRight,
+            colors: [Color(0xFF1B4342), Color(0xFF102A35)]),
+          borderRadius: BorderRadius.circular(23),
+          border: Border.all(color: const Color(0xFF2B5350)),
+        ),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Row(children: [
+            const Expanded(child: Text('TOTAL WALLET BALANCE',
+              style: TextStyle(color: _mint, fontSize: 12,
+                fontWeight: FontWeight.w800, letterSpacing: 1.1))),
+            IconButton(
+              tooltip: _balancesVisible ? 'Hide balances' : 'Show balances',
+              visualDensity: VisualDensity.compact,
+              onPressed: () => setState(() => _balancesVisible = !_balancesVisible),
+              icon: Icon(_balancesVisible ? Icons.visibility_outlined : Icons.visibility_off_outlined,
+                color: _mint, size: 20),
+            ),
+          ]),
+          const SizedBox(height: 4),
+          FittedBox(fit: BoxFit.scaleDown, alignment: Alignment.centerLeft,
+            child: Text(shownUsd, style: const TextStyle(fontSize: 35,
+              fontWeight: FontWeight.w900, letterSpacing: -.8))),
+          const SizedBox(height: 5),
+          Text(coverage, style: TextStyle(
+            color: estimate.complete ? _muted : const Color(0xFFFFDB8C), fontSize: 12)),
+          const SizedBox(height: 7),
+          Text(_checkedLabel(), style: const TextStyle(color: _muted, fontSize: 11)),
+          const SizedBox(height: 16),
+          Row(children: [
+            Expanded(child: OutlinedButton.icon(
+              onPressed: _refreshing ? null : _refresh,
+              icon: _refreshing
+                  ? const SizedBox(width: 16, height: 16,
+                      child: CircularProgressIndicator(strokeWidth: 2))
+                  : const Icon(Icons.sync, size: 18),
+              label: Text(_refreshing ? 'Checking' : 'Refresh'),
+              style: OutlinedButton.styleFrom(
+                minimumSize: const Size.fromHeight(45),
+                foregroundColor: _mint,
+                side: const BorderSide(color: Color(0xFF5C8179))),
+            )),
+            const SizedBox(width: 10),
+            Expanded(child: ElevatedButton.icon(
+              onPressed: () => setState(() => _tab = 1),
+              icon: const Icon(Icons.qr_code, size: 18),
+              label: const Text('Receive'),
+              style: ElevatedButton.styleFrom(minimumSize: const Size.fromHeight(45)),
+            )),
+          ]),
+        ]),
+      ),
       const SizedBox(height: 22),
+      Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+        const Text('Your assets', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800)),
+        Text('${ChainAsset.values.length} coins',
+          style: const TextStyle(fontSize: 12, color: _muted)),
+      ]),
+      const SizedBox(height: 6),
+      const Text('Tap an asset to reveal its address and receive options.',
+        style: TextStyle(color: _muted, fontSize: 11)),
+      const SizedBox(height: 12),
       LayoutBuilder(builder: (context, constraints) {
-        final cols = constraints.maxWidth > 720 ? 2 : 1;
-        final gap = 14.0;
-        final cardWidth = (constraints.maxWidth - (cols - 1) * gap) / cols;
-        return Wrap(spacing: gap, runSpacing: gap, children: ChainAsset.values.map((a) =>
-          SizedBox(width: cardWidth, child: _assetCard(a, compact: width < 420))).toList());
+        const gap = 10.0;
+        final columns = constraints.maxWidth > 680 ? 2 : 1;
+        final cardWidth = (constraints.maxWidth - (columns - 1) * gap) / columns;
+        return Wrap(spacing: gap, runSpacing: gap, children: [
+          for (final asset in ChainAsset.values)
+            SizedBox(width: cardWidth,
+              child: _assetCard(asset, compact: width < 380)),
+        ]);
       }),
-      const SizedBox(height: 20),
-      const _InfoBanner(icon: Icons.error_outline, text: 'No transaction signing or sending yet. This prototype displays the FIRST receiving address for each chain only. Do not rely on it as an audited production wallet.'),
+      const SizedBox(height: 18),
+      const _InfoBanner(icon: Icons.warning_amber_outlined,
+        text: 'Receive-only prototype. USD totals cover only assets successfully checked at address index 0. No sending, account scanning or security audit yet. Do not deposit real funds.'),
     ]);
   }
 
   Widget _assetCard(ChainAsset asset, {bool compact = false}) {
-    final value = _balances[asset];
+    final balance = _balances[asset];
     final error = _balanceErrors[asset];
-    return Card(
-      margin: EdgeInsets.zero,
-      child: Padding(padding: const EdgeInsets.all(18), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Row(children: [
-          CircleAvatar(radius: 21, backgroundColor: asset.color.withValues(alpha: .15), child: Text(asset.symbol[0], style: TextStyle(fontSize: 19, color: asset.color, fontWeight: FontWeight.bold))),
-          const SizedBox(width: 12),
-          Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Text(asset.name, style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 16)),
-            Text(asset.symbol, style: const TextStyle(fontSize: 12, color: _muted)),
-          ])),
-          const Icon(Icons.arrow_outward, color: _muted, size: 17),
-        ]),
-        const SizedBox(height: 17),
-        Text(value == null ? '— ${asset.symbol}' : '$value ${asset.symbol}',
-          style: TextStyle(fontWeight: FontWeight.bold, fontSize: compact ? 20 : 23)),
-        const SizedBox(height: 5),
-        Text(error != null ? 'Balance unavailable — provider error' :
-             asset == ChainAsset.ltc ? 'Balance lookup not connected' :
-             value == null ? 'Not checked' : 'Public network balance',
-          style: TextStyle(color: error != null ? Colors.orangeAccent : _muted, fontSize: 12)),
-        const SizedBox(height: 14),
-        Text(asset.network, style: const TextStyle(color: _muted, fontSize: 11)),
-        const SizedBox(height: 9),
-        SelectableText(_addresses!.of(asset), maxLines: 2, style: const TextStyle(fontSize: 12, color: Color(0xFFCCDFDF))),
-        const SizedBox(height: 11),
-        Row(children: [
-          Expanded(child: OutlinedButton.icon(onPressed: () => _copyAddress(asset), icon: const Icon(Icons.copy, size: 16), label: const Text('Copy'))),
-          const SizedBox(width: 9),
-          Expanded(child: OutlinedButton.icon(onPressed: () { setState(() { _selected = asset; _tab = 1; }); }, icon: const Icon(Icons.qr_code, size: 16), label: const Text('QR / Receive'))),
-        ]),
-      ])),
+    final price = _usdPrices[asset];
+    final numericBalance = double.tryParse(balance ?? '');
+    final validQuote = numericBalance != null && numericBalance >= 0 &&
+        numericBalance.isFinite && price != null && price.isFinite && price > 0;
+    final usdValue = validQuote ? numericBalance! * price! : null;
+    final expanded = _expandedAssets.contains(asset);
+    final quantity = _balancesVisible
+        ? balance == null ? '— ${asset.symbol}' : '$balance ${asset.symbol}'
+        : '•••• ${asset.symbol}';
+    final usdLabel = _balancesVisible
+        ? PortfolioSummary.formatUsd(usdValue)
+        : '••••';
+    final subtitle = error != null
+        ? 'Balance unavailable'
+        : _refreshing && balance == null
+            ? 'Checking…'
+            : balance == null ? 'Not checked' : 'Confirmed · ${asset.network}';
+
+    return Card(margin: EdgeInsets.zero,
+      clipBehavior: Clip.antiAlias,
+      child: Column(children: [
+        InkWell(
+          onTap: () => setState(() {
+            if (expanded) {
+              _expandedAssets.remove(asset);
+            } else {
+              _expandedAssets.add(asset);
+            }
+          }),
+          child: Padding(padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 15),
+            child: Row(children: [
+              CircleAvatar(radius: 21,
+                backgroundColor: asset.color.withValues(alpha: .15),
+                child: Text(asset.symbol[0], style: TextStyle(
+                  fontWeight: FontWeight.w900, fontSize: 18, color: asset.color))),
+              const SizedBox(width: 11),
+              Expanded(flex: 4, child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Text(asset.name, maxLines: 1, overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 15)),
+                const SizedBox(height: 4),
+                Text(subtitle, maxLines: 1, overflow: TextOverflow.ellipsis,
+                  style: TextStyle(color: error == null ? _muted : Colors.orangeAccent,
+                    fontSize: 10)),
+              ])),
+              const SizedBox(width: 8),
+              Expanded(flex: compact ? 4 : 5,
+                child: Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
+                  FittedBox(fit: BoxFit.scaleDown, alignment: Alignment.centerRight,
+                    child: Text(quantity, style: const TextStyle(
+                      fontWeight: FontWeight.w800, fontSize: 15))),
+                  const SizedBox(height: 4),
+                  Text(usdLabel, style: const TextStyle(color: _muted, fontSize: 12)),
+                ])),
+              const SizedBox(width: 5),
+              Icon(expanded ? Icons.keyboard_arrow_up : Icons.keyboard_arrow_down,
+                color: _muted, size: 19),
+            ])),
+        ),
+        if (expanded) ...[
+          const Divider(height: 1),
+          Padding(padding: const EdgeInsets.fromLTRB(14, 13, 14, 15),
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text(asset.network, style: const TextStyle(color: _muted, fontSize: 11)),
+              const SizedBox(height: 8),
+              SelectableText(_addresses!.of(asset),
+                style: const TextStyle(fontSize: 12, color: Color(0xFFCCDFDF))),
+              const SizedBox(height: 12),
+              Row(children: [
+                Expanded(child: OutlinedButton.icon(
+                  onPressed: () => _copyAddress(asset),
+                  icon: const Icon(Icons.copy, size: 16), label: const Text('Copy'),
+                  style: OutlinedButton.styleFrom(minimumSize: const Size.fromHeight(42)))),
+                const SizedBox(width: 9),
+                Expanded(child: OutlinedButton.icon(
+                  onPressed: () => setState(() { _selected = asset; _tab = 1; }),
+                  icon: const Icon(Icons.qr_code, size: 16), label: const Text('Receive'),
+                  style: OutlinedButton.styleFrom(minimumSize: const Size.fromHeight(42)))),
+              ]),
+            ])),
+        ],
+      ]),
     );
   }
 
@@ -545,6 +739,9 @@ class _VaultScreenState extends State<VaultScreen> {
       const SizedBox(height: 24),
       Card(margin: EdgeInsets.zero, child: Padding(padding: const EdgeInsets.all(20),
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          const ListTile(contentPadding: EdgeInsets.zero, leading: Icon(Icons.shield_outlined, color: _mint),
+              title: Text('100% your keys'), subtitle: Text('No exchange or custodial account. Recovery words stay encrypted on this device; coins remain on their blockchains.')),
+          const Divider(),
           const ListTile(contentPadding: EdgeInsets.zero, leading: Icon(Icons.lock, color: _mint),
               title: Text('Encrypted device storage'), subtitle: Text('Uses Flutter Secure Storage, backed by OS protected encryption.')),
           const Divider(),
@@ -552,7 +749,7 @@ class _VaultScreenState extends State<VaultScreen> {
               title: Text('Important security limitations'), subtitle: Text('No app PIN, device authentication, memory zeroization, external audit or hardware-wallet integration yet.')),
           const Divider(),
           const ListTile(contentPadding: EdgeInsets.zero, leading: Icon(Icons.public, color: Colors.lightBlueAccent),
-              title: Text('No account or wallet backend'), subtitle: Text('Balance refresh contacts public blockchain providers with your PUBLIC address only.')),
+              title: Text('Public balance checks'), subtitle: Text('On wallet open, every 5 minutes while foregrounded, and when Refresh is tapped, public addresses go to blockchain providers. USD market quotes come from CoinGecko. No recovery words are sent.')),
           const SizedBox(height: 12),
           OutlinedButton.icon(onPressed: _showRecoveryPhrase, icon: const Icon(Icons.visibility_outlined), label: const Text('Reveal recovery words'),
               style: OutlinedButton.styleFrom(minimumSize: const Size.fromHeight(49))),
@@ -570,7 +767,7 @@ class _VaultScreenState extends State<VaultScreen> {
         label: const Text('Delete wallet from this device', style: TextStyle(color: Colors.redAccent)),
         style: OutlinedButton.styleFrom(minimumSize: const Size.fromHeight(50))),
       const SizedBox(height: 20),
-      const Text('v0.1 receive-only prototype · Not audited · No warranty. Keep an offline recovery backup.', style: TextStyle(color: _muted, fontSize: 11)),
+      const Text('v0.6 receive-only prototype · Not audited · No warranty. Keep an offline recovery backup.', style: TextStyle(color: _muted, fontSize: 11)),
     ]);
   }
 

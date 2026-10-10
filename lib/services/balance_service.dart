@@ -8,6 +8,7 @@ import '../models/asset.dart';
 class BalanceService {
   static const ethereumRpc = 'https://ethereum-rpc.publicnode.com';
   static const bitcoinApi = 'https://mempool.space/api';
+  static const litecoinApi = 'https://api.blockcypher.com/v1/ltc/main';
   static const tetherErc20 = '0xdac17f958d2ee523a2206206994597c13d831ec7';
 
   final http.Client _client;
@@ -35,7 +36,19 @@ class BalanceService {
         ]);
         return _format(BigInt.parse(_hexValue(result), radix: 16), 6);
       case ChainAsset.ltc:
-        throw UnsupportedError('Litecoin explorer not configured. Address generation is available.');
+        // Confirmed (not mempool) Litecoin amount from a public explorer.
+        // Some explorer deployments may reject ltc1 addresses: report the error,
+        // never silently replace an unavailable balance with zero.
+        final response = await _client.get(
+          Uri.parse('$litecoinApi/addrs/$address/balance'),
+        ).timeout(const Duration(seconds: 15));
+        if (response.statusCode != 200) {
+          throw Exception('Litecoin explorer returned ${response.statusCode}');
+        }
+        final j = jsonDecode(response.body) as Map<String, dynamic>;
+        final satoshis = j['balance'];
+        if (satoshis is! num) throw const FormatException('Missing confirmed Litecoin balance');
+        return _format(BigInt.from(satoshis.toInt()), 8);
     }
   }
 
