@@ -20,5 +20,6 @@ void main() {
     expect(addresses.bitcoin, 'bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu');
     expect(addresses.ethereum.toLowerCase(), '0x9858effd232b4033e47d90003d41ec34ecaeda94');
     expect(addresses.litecoin, startsWith('ltc1q'));
+    expect(addresses.solana, 'HAgk14JpMQLgt6rVgv7cBQFJWFto5Dqxi472uT3DKpqk');
   });
 }

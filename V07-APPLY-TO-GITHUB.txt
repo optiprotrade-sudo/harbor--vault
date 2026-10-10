@@ -1,0 +1,42 @@
+HARBOR VAULT v0.7 - GITHUB INSTALLATION
+
+1. BACK UP your wallet recovery phrase OFFLINE before updating or reinstalling.
+   Do not share it. Avoid uninstalling the existing app unless recovery is tested.
+2. Extract the ZIP ON YOUR COMPUTER. Do not upload the ZIP as-is.
+3. In your existing PRIVATE Github repository, replace matching files and create
+   new files at exactly the same paths as they appear in this ZIP. Do not create
+   another top-level folder such as harbor_vault_v07.
+4. Commit ALL file changes to main before using GitHub Actions.
+5. Actions > Build Harbor Vault Android APK > Run workflow > main.
+6. If tests fail, do not bypass them. Capture the failed step.
+7. A green build provides an APK artifact. Test with EMPTY NEW WALLET ONLY.
+
+EXISTING FILES TO REPLACE
+  pubspec.yaml
+  lib/main.dart
+  lib/models/asset.dart
+  lib/services/wallet_engine.dart
+  lib/services/balance_service.dart
+  lib/services/price_service.dart
+  test/wallet_engine_test.dart
+  test/balance_service_test.dart
+  test/price_service_test.dart
+  .github/workflows/build-android-apk.yml  (artifact label only)
+
+NEW FILES TO ADD
+  lib/models/receive_network.dart
+  lib/screens/send_screen.dart
+  lib/services/fee_service.dart
+  test/fee_service_test.dart
+  test/receive_network_test.dart
+
+VERY IMPORTANT
+ - This is a REVIEW-ONLY Send UI. It cannot sign or broadcast funds.
+ - Solana BIP44 derivation: m/44'/501'/0'/0'. Other Solana wallets may use a different path.
+ - EVM chains share the same displayed address but DO NOT share balances.
+ - Only BTC, ETH, LTC, ERC20 USDT and SOL first addresses are scanned.
+ - Fee quotes are indicative, not exact; L2 gas/data fees, Solana rent,
+   Bitcoin/Litecoin UTXO sizes, and token-specific gas are NOT covered.
+ - TRON/TRC20, XRP, SPL tokens, Lightning and arbitrary networks are not supported.
+ - No real cryptocurrency until complete signing, restoration, authentication,
+   network-validation and independent security audit.

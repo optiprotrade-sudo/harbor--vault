@@ -7,6 +7,7 @@ import 'package:bech32/bech32.dart' as bech32;
 import 'package:crypto/crypto.dart' as crypto;
 import 'package:pointycastle/export.dart' show RIPEMD160Digest;
 import 'package:web3dart/web3dart.dart' show EthPrivateKey;
+import 'package:solana_sdk/solana_sdk.dart' show Keypair, DerivationPath;
 
 import '../models/asset.dart';
 
@@ -62,10 +63,20 @@ class WalletEngine {
     // USDT on Ethereum uses the same account address.
     final ethereumAddress = EthPrivateKey.fromHex(ethHex).address.eip55With0x;
 
+    // Solana uses hardened Ed25519 / SLIP-0010, not an EVM address.
+    // This path is ONE commonly-used Solana convention; other wallet apps
+    // may use m/44'/501'/0' or other account indexes.
+    final solanaKeypair = Keypair.fromSeedAndDerivationPath(
+      Uint8List.fromList(mnemonic.seed),
+      DerivationPath.bip44(account: 0, change: 0),
+    );
+    final solanaAddress = solanaKeypair.publicKey.toString();
+
     return PublicAddresses(
       bitcoin: _nativeSegwitAddress('bc', btcPublicKey),
       ethereum: ethereumAddress,
       litecoin: _nativeSegwitAddress('ltc', ltcPublicKey),
+      solana: solanaAddress,
     );
   }
 

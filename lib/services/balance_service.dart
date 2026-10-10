@@ -9,6 +9,7 @@ class BalanceService {
   static const ethereumRpc = 'https://ethereum-rpc.publicnode.com';
   static const bitcoinApi = 'https://mempool.space/api';
   static const litecoinApi = 'https://api.blockcypher.com/v1/ltc/main';
+  static const solanaRpc = 'https://api.mainnet-beta.solana.com';
   static const tetherErc20 = '0xdac17f958d2ee523a2206206994597c13d831ec7';
 
   final http.Client _client;
@@ -35,6 +36,25 @@ class BalanceService {
           'latest'
         ]);
         return _format(BigInt.parse(_hexValue(result), radix: 16), 6);
+      case ChainAsset.sol:
+        final response = await _client.post(
+          Uri.parse(solanaRpc),
+          headers: const {'content-type': 'application/json'},
+          body: jsonEncode({
+            'jsonrpc': '2.0', 'id': 1, 'method': 'getBalance',
+            'params': [address, {'commitment': 'confirmed'}]
+          }),
+        ).timeout(const Duration(seconds: 15));
+        if (response.statusCode != 200) {
+          throw StateError('Solana RPC returned ${response.statusCode}');
+        }
+        final decoded = jsonDecode(response.body) as Map<String, dynamic>;
+        if (decoded['error'] != null) throw StateError('Solana RPC error');
+        final result = decoded['result'];
+        if (result is! Map || result['value'] is! num) {
+          throw const FormatException('Solana RPC balance unavailable');
+        }
+        return _format(BigInt.from((result['value'] as num).toInt()), 9);
       case ChainAsset.ltc:
         // Confirmed (not mempool) Litecoin amount from a public explorer.
         // Some explorer deployments may reject ltc1 addresses: report the error,

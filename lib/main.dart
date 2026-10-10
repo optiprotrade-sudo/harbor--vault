@@ -4,6 +4,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import 'models/asset.dart';
+import 'models/receive_network.dart';
+import 'screens/send_screen.dart';
 import 'services/balance_service.dart';
 import 'services/price_service.dart';
 import 'services/portfolio_summary.dart';
@@ -87,6 +89,7 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
   int _refreshVersion = 0;
   int _tab = 0;
   ChainAsset _selected = ChainAsset.btc;
+  ReceiveNetwork _receiveNetwork = ReceiveNetwork.bitcoin;
   final Map<ChainAsset, String> _balances = {};
   final Map<ChainAsset, String> _balanceErrors = {};
 
@@ -280,6 +283,21 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
     _snack('${asset.symbol} public address copied. Verify the network before depositing.');
   }
 
+  Future<void> _copyNetworkAddress(ReceiveNetwork network) async {
+    final addresses = _addresses;
+    if (addresses == null) return;
+    await Clipboard.setData(ClipboardData(text: network.addressOf(addresses)));
+    _snack('Address copied for ${network.label}. Double-check the exact sending network.');
+  }
+
+  ReceiveNetwork _networkForAsset(ChainAsset asset) => switch (asset) {
+    ChainAsset.btc => ReceiveNetwork.bitcoin,
+    ChainAsset.eth => ReceiveNetwork.ethereum,
+    ChainAsset.ltc => ReceiveNetwork.litecoin,
+    ChainAsset.usdt => ReceiveNetwork.usdtErc20,
+    ChainAsset.sol => ReceiveNetwork.solana,
+  };
+
   void _snack(String message) {
     if (!mounted) return;
     ScaffoldMessenger.of(context)
@@ -385,7 +403,7 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
         actions: [
           if (wallet)
             const Padding(padding: EdgeInsets.only(right: 12), child: Center(
-              child: Text('SELF-CUSTODY  •  v0.6', style: TextStyle(fontSize: 10, color: _muted)))),
+              child: Text('SELF-CUSTODY  •  v0.7', style: TextStyle(fontSize: 10, color: _muted)))),
         ],
       ),
       body: wallet
@@ -398,6 +416,7 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
               destinations: const [
                 NavigationRailDestination(icon: Icon(Icons.account_balance_wallet_outlined), selectedIcon: Icon(Icons.account_balance_wallet), label: Text('Assets')),
                 NavigationRailDestination(icon: Icon(Icons.qr_code), label: Text('Receive')),
+                NavigationRailDestination(icon: Icon(Icons.send_outlined), label: Text('Send')),
                 NavigationRailDestination(icon: Icon(Icons.shield_outlined), label: Text('Security')),
               ],
             ),
@@ -415,6 +434,7 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
             destinations: const [
               NavigationDestination(icon: Icon(Icons.account_balance_wallet_outlined), selectedIcon: Icon(Icons.account_balance_wallet), label: 'Assets'),
               NavigationDestination(icon: Icon(Icons.qr_code), label: 'Receive'),
+              NavigationDestination(icon: Icon(Icons.send_outlined), label: 'Send'),
               NavigationDestination(icon: Icon(Icons.shield_outlined), label: 'Security'),
             ],
           ) : null,
@@ -438,7 +458,7 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
       const SizedBox(height: 28),
       const Text('Your coins.\nYour keys.', style: TextStyle(fontWeight: FontWeight.w900, fontSize: 48, height: 1.05)),
       const SizedBox(height: 18),
-      const Text('A private home for Bitcoin, Ethereum, Litecoin and Ethereum-network USDT. No server account. No custodial access.', style: TextStyle(color: _muted, fontSize: 16, height: 1.6)),
+      const Text('A private home for Bitcoin, Ethereum, Litecoin, Solana and Ethereum-network USDT. No server account. No custodial access.', style: TextStyle(color: _muted, fontSize: 16, height: 1.6)),
       const SizedBox(height: 32),
       const _InfoBanner(icon: Icons.warning_amber_outlined, text: 'PROTOTYPE · Receive-only. Do not deposit real funds until builds, derivation and storage have been independently audited.'),
       const SizedBox(height: 24),
@@ -497,6 +517,7 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
         child: switch (_tab) {
           0 => _assetsView(),
           1 => _receiveView(),
+          2 => SendScreen(addresses: _addresses!),
           _ => _securityView(),
         }),
     ));
@@ -511,7 +532,7 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
     final coverage = estimate.usd == null
         ? _priceError ?? 'Waiting for balance and USD price checks'
         : estimate.complete
-            ? 'Estimate for all 4 listed addresses'
+            ? 'Estimate for all 5 tracked first addresses'
             : 'Partial estimate · ${estimate.counted} of ${estimate.total} assets priced';
 
     return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -547,6 +568,9 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
               icon: Icon(_balancesVisible ? Icons.visibility_outlined : Icons.visibility_off_outlined,
                 color: _mint, size: 20),
             ),
+            IconButton(onPressed: _refreshing ? null : _refresh,
+              tooltip: 'Refresh balances and USD prices',
+              icon: const Icon(Icons.sync, color: _mint, size: 20)),
           ]),
           const SizedBox(height: 4),
           FittedBox(fit: BoxFit.scaleDown, alignment: Alignment.centerLeft,
@@ -560,12 +584,9 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
           const SizedBox(height: 16),
           Row(children: [
             Expanded(child: OutlinedButton.icon(
-              onPressed: _refreshing ? null : _refresh,
-              icon: _refreshing
-                  ? const SizedBox(width: 16, height: 16,
-                      child: CircularProgressIndicator(strokeWidth: 2))
-                  : const Icon(Icons.sync, size: 18),
-              label: Text(_refreshing ? 'Checking' : 'Refresh'),
+              onPressed: () => setState(() => _tab = 2),
+              icon: const Icon(Icons.send_outlined, size: 18),
+              label: const Text('Send'),
               style: OutlinedButton.styleFrom(
                 minimumSize: const Size.fromHeight(45),
                 foregroundColor: _mint,
@@ -603,7 +624,7 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
       }),
       const SizedBox(height: 18),
       const _InfoBanner(icon: Icons.warning_amber_outlined,
-        text: 'Receive-only prototype. USD totals cover only assets successfully checked at address index 0. No sending, account scanning or security audit yet. Do not deposit real funds.'),
+        text: 'Review-only sending. USD total covers five tracked first addresses only, not every EVM chain or token. Never deposit real funds until signing and recovery are audited.'),
     ]);
   }
 
@@ -684,7 +705,7 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
                   style: OutlinedButton.styleFrom(minimumSize: const Size.fromHeight(42)))),
                 const SizedBox(width: 9),
                 Expanded(child: OutlinedButton.icon(
-                  onPressed: () => setState(() { _selected = asset; _tab = 1; }),
+                  onPressed: () => setState(() { _selected = asset; _receiveNetwork = _networkForAsset(asset); _tab = 1; }),
                   icon: const Icon(Icons.qr_code, size: 16), label: const Text('Receive'),
                   style: OutlinedButton.styleFrom(minimumSize: const Size.fromHeight(42)))),
               ]),
@@ -695,37 +716,54 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
   }
 
   Widget _receiveView() {
-    final address = _addresses!.of(_selected);
+    final addresses = _addresses!;
+    final network = _receiveNetwork;
+    final address = network.addressOf(addresses);
     return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      _pill('PUBLIC RECEIVE ADDRESSES'),
+      _pill('NETWORK-SPECIFIC RECEIVE ADDRESSES'),
       const SizedBox(height: 17),
-      const Text('Receive crypto', style: TextStyle(fontSize: 33, fontWeight: FontWeight.w900)),
-      const SizedBox(height: 6),
-      const Text('Choose the exact coin AND network before sharing an address.', style: TextStyle(color: _muted)),
-      const SizedBox(height: 23),
-      Wrap(spacing: 9, runSpacing: 9, children: ChainAsset.values.map((a) =>
-        ChoiceChip(label: Text(a.symbol), selected: _selected == a, onSelected: (_) => setState(() => _selected = a))).toList()),
-      const SizedBox(height: 22),
-      Container(width: double.infinity, padding: const EdgeInsets.all(24),
+      const Text('Receive crypto', style: TextStyle(fontSize: 30, fontWeight: FontWeight.w900)),
+      const SizedBox(height: 8),
+      const Text('Choose the exact network. Addresses on EVM networks may look the same but balances remain separate.',
+        style: TextStyle(color: _muted)),
+      const SizedBox(height: 18),
+      DropdownButtonFormField<ReceiveNetwork>(
+        value: _receiveNetwork,
+        isExpanded: true,
+        decoration: const InputDecoration(labelText: 'Coin / Network'),
+        items: ReceiveNetwork.values.map((r) => DropdownMenuItem(
+          value: r, child: Text(r.label, overflow: TextOverflow.ellipsis),
+        )).toList(),
+        onChanged: (r) { if (r != null) setState(() => _receiveNetwork = r); },
+      ),
+      const SizedBox(height: 18),
+      Container(width: double.infinity, padding: const EdgeInsets.all(19),
         decoration: BoxDecoration(color: _panel, borderRadius: BorderRadius.circular(22)),
         child: Column(children: [
-          Text(_selected.name, style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w800)),
-          const SizedBox(height: 4),
-          Text(_selected.network, textAlign: TextAlign.center, style: const TextStyle(color: _muted, fontSize: 12)),
-          const SizedBox(height: 24),
-          Container(padding: const EdgeInsets.all(15), decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(16)),
-            child: QrImageView(data: address, size: 208, backgroundColor: Colors.white, errorCorrectionLevel: QrErrorCorrectLevel.M)),
-          const SizedBox(height: 24),
-          SelectableText(address, textAlign: TextAlign.center, style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 14)),
+          Text(network.label, textAlign: TextAlign.center,
+            style: const TextStyle(fontSize: 19, fontWeight: FontWeight.w800)),
+          const SizedBox(height: 5),
+          Text(network.derivationPath, style: const TextStyle(color: _muted, fontSize: 12)),
           const SizedBox(height: 18),
-          ElevatedButton.icon(onPressed: () => _copyAddress(_selected), icon: const Icon(Icons.copy), label: const Text('Copy receiving address')),
+          Container(padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(14)),
+            child: QrImageView(data: address, size: 195, backgroundColor: Colors.white)),
+          const SizedBox(height: 16),
+          SelectableText(address, textAlign: TextAlign.center,
+            style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13)),
+          const SizedBox(height: 17),
+          ElevatedButton.icon(onPressed: () => _copyNetworkAddress(network),
+            icon: const Icon(Icons.copy), label: const Text('Copy address')),
         ])),
-      const SizedBox(height: 18),
-      _InfoBanner(icon: Icons.warning_amber_outlined, text: _selected == ChainAsset.usdt
-        ? 'USDT here means ERC-20 on Ethereum only. DO NOT send TRC-20, BEP-20, Solana or other-chain USDT to this address.'
-        : 'Use only ${_selected.network}. A transaction sent using another network may be permanently lost.'),
+      const SizedBox(height: 14),
+      _InfoBanner(icon: Icons.warning_amber_outlined, text: network.caution),
       const SizedBox(height: 12),
-      const Text('One address is shown per blockchain. This version does not rotate or scan addresses.', style: TextStyle(color: _muted, fontSize: 12)),
+      if (network.trackedAsset == null)
+        const Text('Preview address only · balance and token indexing for this network are not implemented in v0.7.',
+          style: TextStyle(color: Colors.orangeAccent, fontSize: 12)),
+      const SizedBox(height: 12),
+      const Text('Not all chains are EVM. TRON, XRP, Bitcoin Lightning, SPL token accounts, and every token on these networks require separate implementation and testing.',
+        style: TextStyle(color: _muted, fontSize: 12)),
     ]);
   }
 
@@ -767,7 +805,7 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
         label: const Text('Delete wallet from this device', style: TextStyle(color: Colors.redAccent)),
         style: OutlinedButton.styleFrom(minimumSize: const Size.fromHeight(50))),
       const SizedBox(height: 20),
-      const Text('v0.6 receive-only prototype · Not audited · No warranty. Keep an offline recovery backup.', style: TextStyle(color: _muted, fontSize: 11)),
+      const Text('v0.7 receive addresses + review-only send · Not audited · No warranty. Keep an offline recovery backup.', style: TextStyle(color: _muted, fontSize: 11)),
     ]);
   }
 

@@ -56,6 +56,19 @@ void main() {
     service.dispose();
   });
 
+  test('Solana balance comes from confirmed lamports, not invented units', () async {
+    final service = BalanceService(MockClient((request) async {
+      expect(request.url.host, 'api.mainnet-beta.solana.com');
+      expect(jsonDecode(request.body)['method'], 'getBalance');
+      return http.Response(jsonEncode({
+        'jsonrpc': '2.0', 'id': 1,
+        'result': {'context': {'slot': 123}, 'value': 1234567890}
+      }), 200);
+    }));
+    expect(await service.fetch(ChainAsset.sol, 'somePublicAddress'), '1.23456789');
+    service.dispose();
+  });
+
   test('Explorer failure must not become an invented zero balance', () async {
     final service = BalanceService(MockClient((_) async => http.Response('error', 429)));
     await expectLater(service.fetch(ChainAsset.ltc, 'ltc1qtest'), throwsException);
