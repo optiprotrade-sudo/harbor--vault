@@ -14,10 +14,13 @@ import '../models/asset.dart';
 /// Receive-address demo. It derives ONLY account zero, external address zero.
 /// Not a scanner or a transaction signer. Not audited for real funds.
 class WalletEngine {
-  static String createMnemonic() {
+  static String createMnemonic({int words = 12}) {
+    if (words != 12 && words != 24) {
+      throw ArgumentError('Only 12 or 24 BIP39 words are supported.');
+    }
     final random = Random.secure();
     final entropy = Uint8List.fromList(
-      List<int>.generate(16, (_) => random.nextInt(256)),
+      List<int>.generate(words == 12 ? 16 : 32, (_) => random.nextInt(256)),
     );
     return bip39.Mnemonic(entropy, bip39.Language.english).sentence;
   }

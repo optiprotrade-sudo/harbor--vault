@@ -1,0 +1,19 @@
+HARBOR VAULT v0.6.1 — ONE-FILE TEST FIX
+
+The v0.6 update added Litecoin confirmed-balance lookup. An older test in your GitHub repository still expects Litecoin to be unsupported, so 6 tests pass and 1 fails.
+
+Replace only this GitHub file:
+  test/balance_service_test.dart
+
+Open the included test/balance_service_test.dart in Notepad++, copy all its contents, and paste into the GitHub editor for the same file. Commit directly to main.
+
+Do not modify the build workflow or disable the failed test.
+
+After committing, verify the file contains this test title:
+  Litecoin confirmed balance returns satoshis from public explorer
+and does not contain:
+  Litecoin balance is explicitly unsupported rather than fabricated
+
+Then run your normal Build Harbor Vault Android APK GitHub Actions workflow. This archive is source only; it is NOT an APK. No Flutter compile was performed here.
+
+SAFETY: This remains an unaudited receive-only development wallet. Do not deposit real funds.

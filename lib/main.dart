@@ -5,11 +5,16 @@ import 'package:flutter/services.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import 'models/asset.dart';
 import 'models/receive_network.dart';
+import 'models/wallet_listing.dart';
 import 'screens/send_screen.dart';
+import 'screens/history_screen.dart';
+import 'screens/owner_screen.dart';
 import 'services/balance_service.dart';
 import 'services/price_service.dart';
 import 'services/portfolio_summary.dart';
 import 'services/vault_storage.dart';
+import 'services/device_auth_service.dart';
+import 'services/wallet_preferences.dart';
 import 'services/wallet_engine.dart';
 
 void main() async {
@@ -22,7 +27,7 @@ const _panel = Color(0xFF10242B);
 const _mint = Color(0xFF8DF0CB);
 const _muted = Color(0xFFA0B9BF);
 
-enum _Page { loading, welcome, backup, restore, wallet, error }
+enum _Page { loading, locked, welcome, backup, restore, wallet, error }
 
 class HarborVaultApp extends StatelessWidget {
   const HarborVaultApp({super.key});
@@ -68,11 +73,19 @@ class VaultScreen extends StatefulWidget {
 
 class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
   final _storage = VaultStorage();
+  final _deviceAuth = DeviceAuthService();
+  final _prefs = WalletPreferences();
+  bool _authInProgress = false;
+  bool _backupVerified = false;
+  String _walletName = 'My Harbor Wallet';
+  int _newWordCount = 12;
   final _balanceService = BalanceService();
   final _priceService = PriceService();
   final _word3 = TextEditingController();
   final _word9 = TextEditingController();
   final _importText = TextEditingController();
+  final _assetSearch = TextEditingController();
+  String _assetFilter = 'All';
   _Page _page = _Page.loading;
   PublicAddresses? _addresses;
   String? _pendingMnemonic;
@@ -84,12 +97,13 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
   DateTime? _lastChecked;
   String? _priceError;
   Timer? _autoRefreshTimer;
-  final Set<ChainAsset> _expandedAssets = {};
+  final Set<ReceiveNetwork> _expandedNetworks = {};
   final Map<ChainAsset, double> _usdPrices = {};
   int _refreshVersion = 0;
   int _tab = 0;
   ChainAsset _selected = ChainAsset.btc;
   ReceiveNetwork _receiveNetwork = ReceiveNetwork.bitcoin;
+  ReceiveNetwork _sendNetwork = ReceiveNetwork.bitcoin;
   final Map<ChainAsset, String> _balances = {};
   final Map<ChainAsset, String> _balanceErrors = {};
 
@@ -107,6 +121,10 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
   void didChangeAppLifecycleState(AppLifecycleState state) {
     final wasForeground = _foreground;
     _foreground = state == AppLifecycleState.resumed;
+    if ((state == AppLifecycleState.paused || state == AppLifecycleState.hidden) &&
+        _page == _Page.wallet && !_authInProgress) {
+      _lock();
+    }
     if (!wasForeground && _foreground && _page == _Page.wallet) _refresh();
   }
 
@@ -123,6 +141,7 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
     _word3.dispose();
     _word9.dispose();
     _importText.dispose();
+    _assetSearch.dispose();
     _balanceService.dispose();
     _priceService.dispose();
     super.dispose();
@@ -130,18 +149,10 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
 
   Future<void> _boot() async {
     try {
-      final phrase = await _storage.getPhrase();
+      // Never read or derive from the recovery phrase before device unlock.
+      final exists = await _storage.exists();
       if (!mounted) return;
-      if (phrase == null) {
-        setState(() => _page = _Page.welcome);
-      } else {
-        final derived = WalletEngine.derive(phrase);
-        if (mounted) setState(() {
-          _addresses = derived;
-          _page = _Page.wallet;
-        });
-        _scheduleFirstCheck();
-      }
+      setState(() => _page = exists ? _Page.locked : _Page.welcome);
     } catch (e) {
       if (mounted) setState(() {
         _error = 'Unable to open the encrypted wallet. Details: $e';
@@ -150,9 +161,109 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
     }
   }
 
+  Future<bool> _authenticate(String reason) async {
+    if (_authInProgress) return false;
+    _authInProgress = true;
+    try { return await _deviceAuth.authenticate(reason: reason); }
+    finally { _authInProgress = false; }
+  }
+
+  Future<void> _unlockWallet() async {
+    if (_saving || _page != _Page.locked) return;
+    setState(() => _saving = true);
+    try {
+      final authorized = await _authenticate(
+        'Unlock Harbor Vault using your phone fingerprint or passcode');
+      if (!authorized) {
+        _snack('Phone authentication unavailable or cancelled. Configure a screen lock in Android Settings.');
+        return;
+      }
+      final phrase = await _storage.getPhrase();
+      if (phrase == null) throw StateError('No encrypted phrase was found.');
+      final derived = WalletEngine.derive(phrase);
+      final walletName = await _prefs.getWalletName();
+      final verified = await _prefs.isBackupVerified();
+      if (!mounted) return;
+      setState(() {
+        _addresses = derived;
+        _walletName = walletName;
+        _backupVerified = verified;
+        _page = _Page.wallet;
+        _balances.clear(); _balanceErrors.clear(); _usdPrices.clear();
+        _lastChecked = null;
+      });
+      _scheduleFirstCheck();
+    } catch (e) {
+      _snack('Could not open the encrypted wallet: $e');
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  void _lock() {
+    if (_page != _Page.wallet) return;
+    setState(() {
+      _page = _Page.locked;
+      _addresses = null;
+      _balances.clear(); _balanceErrors.clear(); _usdPrices.clear();
+      _lastChecked = null;
+      _refreshVersion++;
+      _refreshing = false;
+      _expandedNetworks.clear();
+      _tab = 0;
+    });
+  }
+
+  Future<void> _setWalletName(String name) async {
+    await _prefs.setWalletName(name);
+    if (mounted) setState(() => _walletName = name.trim());
+  }
+
+  Future<void> _verifyOfflineBackup() async {
+    if (!await _authenticate('Authorize checking your recovery backup')) {
+      _snack('Authentication required to verify the offline backup.');
+      return;
+    }
+    final phrase = await _storage.getPhrase();
+    if (!mounted || phrase == null) return;
+    final words = phrase.split(' ');
+    final positionA = 3;
+    final positionB = words.length == 24 ? 21 : 9;
+    final a = TextEditingController();
+    final b = TextEditingController();
+    final success = await showDialog<bool>(context: context, builder: (ctx) => AlertDialog(
+      title: const Text('Check your written backup'),
+      content: Column(mainAxisSize: MainAxisSize.min, children: [
+        const Text('Use your offline paper backup. Do not send these words anywhere.'),
+        const SizedBox(height: 10),
+        TextField(controller: a, autocorrect: false, enableSuggestions: false,
+          decoration: InputDecoration(labelText: 'Word #$positionA')),
+        const SizedBox(height: 10),
+        TextField(controller: b, autocorrect: false, enableSuggestions: false,
+          decoration: InputDecoration(labelText: 'Word #$positionB')),
+      ]),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
+        TextButton(onPressed: () => Navigator.pop(ctx,
+          a.text.toLowerCase().trim() == words[positionA - 1] &&
+          b.text.toLowerCase().trim() == words[positionB - 1]),
+          child: const Text('Verify')),
+      ],
+    ));
+    a.dispose(); b.dispose();
+    if (!mounted) return;
+    if (success == true) {
+      await _prefs.setBackupVerified(true);
+      if (mounted) setState(() => _backupVerified = true);
+      _snack('Paper backup verified on this device.');
+    } else {
+      _snack('Not verified. Keep your offline recovery phrase safe.');
+    }
+  }
+
   void _create() {
     try {
-      final phrase = WalletEngine.createMnemonic();
+      final phrase = WalletEngine.createMnemonic(words: _newWordCount);
       // Derive before accepting or persisting the phrase.
       WalletEngine.derive(phrase);
       _word3.clear();
@@ -192,13 +303,20 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
     if (_saving) return;
     setState(() => _saving = true);
     try {
+      final authorized = await _authenticate('Authorize secure wallet creation or recovery');
+      if (!authorized) {
+        _snack('Set up and unlock your phone with a PIN, pattern or fingerprint first.');
+        return;
+      }
       final derived = WalletEngine.derive(phrase);
       await _storage.storePhrase(phrase);
+      await _prefs.resetForNewWallet();
       if (!mounted) return;
       setState(() {
         _addresses = derived;
         _page = _Page.wallet;
         _pendingMnemonic = null;
+        _backupVerified = false;
         _balances.clear();
         _balanceErrors.clear();
         _usdPrices.clear();
@@ -206,7 +324,7 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
         _priceError = null;
         _refreshVersion++;
         _refreshing = false;
-        _expandedAssets.clear();
+        _expandedNetworks.clear();
       });
       _scheduleFirstCheck();
       _snack('Wallet saved in device encrypted storage.');
@@ -327,6 +445,8 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
     );
     confirmation.dispose();
     if (accepted != true || !mounted) return;
+    final authorized = await _authenticate('Authorize revealing your secret recovery words');
+    if (!authorized) { _snack('Phone authentication required.'); return; }
     try {
       final phrase = await _storage.getPhrase();
       if (!mounted || phrase == null) return;
@@ -366,11 +486,17 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
     );
     controller.dispose();
     if (confirmed != true || !mounted) return;
+    if (!await _authenticate('Authorize deleting the local wallet')) {
+      _snack('Phone authentication required.');
+      return;
+    }
     try {
       await _storage.remove();
+      await _prefs.resetForNewWallet();
       if (!mounted) return;
       setState(() {
         _addresses = null;
+        _backupVerified = false;
         _balances.clear();
         _balanceErrors.clear();
         _usdPrices.clear();
@@ -378,7 +504,7 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
         _priceError = null;
         _refreshVersion++;
         _refreshing = false;
-        _expandedAssets.clear();
+        _expandedNetworks.clear();
         _page = _Page.welcome;
         _tab = 0;
         _selected = ChainAsset.btc;
@@ -406,7 +532,7 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
         actions: [
           if (wallet)
             const Padding(padding: EdgeInsets.only(right: 12), child: Center(
-              child: Text('SELF-CUSTODY  •  v0.8', style: TextStyle(fontSize: 10, color: _muted)))),
+              child: Text('SELF-CUSTODY  •  v1.0', style: TextStyle(fontSize: 10, color: _muted)))),
         ],
       ),
       body: wallet
@@ -420,7 +546,9 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
                 NavigationRailDestination(icon: Icon(Icons.account_balance_wallet_outlined), selectedIcon: Icon(Icons.account_balance_wallet), label: Text('Assets')),
                 NavigationRailDestination(icon: Icon(Icons.qr_code), label: Text('Receive')),
                 NavigationRailDestination(icon: Icon(Icons.send_outlined), label: Text('Send')),
+                NavigationRailDestination(icon: Icon(Icons.history), label: Text('Activity')),
                 NavigationRailDestination(icon: Icon(Icons.shield_outlined), label: Text('Security')),
+                NavigationRailDestination(icon: Icon(Icons.admin_panel_settings_outlined), label: Text('Owner')),
               ],
             ),
             Expanded(child: _walletContent()),
@@ -432,13 +560,16 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
       bottomNavigationBar: wallet && !desktop
         ? NavigationBar(
             backgroundColor: const Color(0xFF0E222A),
+            labelBehavior: NavigationDestinationLabelBehavior.onlyShowSelected,
             selectedIndex: _tab,
             onDestinationSelected: (value) => setState(() => _tab = value),
             destinations: const [
               NavigationDestination(icon: Icon(Icons.account_balance_wallet_outlined), selectedIcon: Icon(Icons.account_balance_wallet), label: 'Assets'),
               NavigationDestination(icon: Icon(Icons.qr_code), label: 'Receive'),
               NavigationDestination(icon: Icon(Icons.send_outlined), label: 'Send'),
+              NavigationDestination(icon: Icon(Icons.history), label: 'Activity'),
               NavigationDestination(icon: Icon(Icons.shield_outlined), label: 'Security'),
+              NavigationDestination(icon: Icon(Icons.admin_panel_settings_outlined), label: 'Owner'),
             ],
           ) : null,
     );
@@ -446,6 +577,25 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
 
   Widget _onboarding() {
     if (_page == _Page.loading) return const Center(child: CircularProgressIndicator());
+    if (_page == _Page.locked) return Column(
+      mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        const Icon(Icons.lock_outline, size: 62, color: _mint),
+        const SizedBox(height: 20),
+        const Text('Harbor Vault is locked', textAlign: TextAlign.center,
+          style: TextStyle(fontSize: 26, fontWeight: FontWeight.w900)),
+        const SizedBox(height: 12),
+        const Text('Unlock using your phone fingerprint, PIN, pattern or passcode. Your private keys remain encrypted on this device.',
+          textAlign: TextAlign.center, style: TextStyle(color: _muted)),
+        const SizedBox(height: 24),
+        ElevatedButton.icon(onPressed: _saving ? null : _unlockWallet,
+          icon: const Icon(Icons.fingerprint),
+          label: Text(_saving ? 'Unlocking…' : 'Unlock wallet')),
+        const SizedBox(height: 12),
+        const Text('If the phone has no secure screen lock, enable one in Android Settings. Recovery words are required if you uninstall or replace the app.',
+          textAlign: TextAlign.center, style: TextStyle(color: _muted, fontSize: 11)),
+      ],
+    );
     if (_page == _Page.error) return Column(mainAxisSize: MainAxisSize.min, children: [
       const Icon(Icons.error_outline, color: Colors.orangeAccent, size: 54),
       const SizedBox(height: 18),
@@ -465,6 +615,15 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
       const SizedBox(height: 32),
       const _InfoBanner(icon: Icons.warning_amber_outlined, text: 'PROTOTYPE · Receive-only. Do not deposit real funds until builds, derivation and storage have been independently audited.'),
       const SizedBox(height: 24),
+      const Text('Recovery phrase length', style: TextStyle(fontWeight: FontWeight.w700)),
+      const SizedBox(height: 8),
+      Wrap(spacing: 10, children: [
+        ChoiceChip(label: const Text('12 words'), selected: _newWordCount == 12,
+          onSelected: (_) => setState(() => _newWordCount = 12)),
+        ChoiceChip(label: const Text('24 words'), selected: _newWordCount == 24,
+          onSelected: (_) => setState(() => _newWordCount = 24)),
+      ]),
+      const SizedBox(height: 18),
       ElevatedButton.icon(onPressed: _create, icon: const Icon(Icons.add_circle_outline), label: const Text('Create a new wallet')),
       const SizedBox(height: 12),
       OutlinedButton.icon(onPressed: () => setState(() => _page = _Page.restore), icon: const Icon(Icons.restore), label: const Text('Restore with recovery words'), style: OutlinedButton.styleFrom(minimumSize: const Size.fromHeight(52))),
@@ -495,7 +654,7 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
         const SizedBox(height: 12),
         const Text('Secure your recovery words', style: TextStyle(fontSize: 30, fontWeight: FontWeight.w800)),
         const SizedBox(height: 14),
-        const _InfoBanner(icon: Icons.lock_outline, text: 'Write these 12 words on paper, in order. Do NOT take screenshots, copy them into chat, or save them in cloud notes.'),
+        const _InfoBanner(icon: Icons.lock_outline, text: 'Write these recovery words on paper, in order. Do NOT take screenshots, copy them into chat, or save them in cloud notes.'),
         const SizedBox(height: 20),
         _PhraseGrid(phrase: phrase),
         const SizedBox(height: 22),
@@ -520,15 +679,19 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
         child: switch (_tab) {
           0 => _assetsView(),
           1 => _receiveView(),
-          2 => SendScreen(addresses: _addresses!),
-          _ => _securityView(),
+          2 => SendScreen(addresses: _addresses!, initialNetwork: _sendNetwork,
+            balances: _balances, usdPrices: _usdPrices, walletName: _walletName),
+          3 => HistoryScreen(addresses: _addresses!),
+          4 => _securityView(),
+          _ => OwnerScreen(walletName: _walletName, addresses: _addresses!,
+            backupVerified: _backupVerified, onRename: _setWalletName,
+            onVerifyBackup: _verifyOfflineBackup, onLock: _lock),
         }),
     ));
   }
 
   Widget _assetsView() {
     final estimate = PortfolioSummary.calculate(_balances, _usdPrices);
-    final width = MediaQuery.sizeOf(context).width;
     final shownUsd = _balancesVisible
         ? PortfolioSummary.formatUsd(estimate.usd)
         : '••••••';
@@ -539,13 +702,15 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
             : 'Partial estimate · ${estimate.counted} of ${estimate.total} assets priced';
 
     return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-        const Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Text('My wallet', style: TextStyle(fontSize: 26, fontWeight: FontWeight.w900)),
-          SizedBox(height: 4),
-          Text('Mainnet · First receiving address only',
+      Row(children: [
+        Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text(_walletName, maxLines: 2, overflow: TextOverflow.ellipsis,
+            style: const TextStyle(fontSize: 26, fontWeight: FontWeight.w900)),
+          const SizedBox(height: 4),
+          const Text('Mainnet · First receiving address only',
             style: TextStyle(color: _muted, fontSize: 11)),
-        ]),
+        ])),
+        const SizedBox(width: 8),
         const Icon(Icons.account_balance_wallet_outlined, color: _mint),
       ]),
       const SizedBox(height: 17),
@@ -608,114 +773,143 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
       const SizedBox(height: 22),
       Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
         const Text('Your assets', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800)),
-        Text('${ChainAsset.values.length} coins',
+        Text('${WalletListing.all.length} networks & tokens',
           style: const TextStyle(fontSize: 12, color: _muted)),
       ]),
-      const SizedBox(height: 6),
-      const Text('Tap an asset to reveal its address and receive options.',
-        style: TextStyle(color: _muted, fontSize: 11)),
-      const SizedBox(height: 12),
+      const SizedBox(height: 10),
+      Row(children: [
+        Expanded(child: TextField(controller: _assetSearch,
+          onChanged: (_) => setState(() {}),
+          decoration: const InputDecoration(
+            hintText: 'Search BTC, USDT, TRC-20, Base…',
+            prefixIcon: Icon(Icons.search)))),
+        const SizedBox(width: 8),
+        PopupMenuButton<String>(
+          tooltip: 'Filter coins',
+          initialValue: _assetFilter,
+          onSelected: (value) => setState(() => _assetFilter = value),
+          itemBuilder: (_) => const [
+            PopupMenuItem(value: 'All', child: Text('All assets')),
+            PopupMenuItem(value: 'Native', child: Text('Native coins')),
+            PopupMenuItem(value: 'Stablecoins', child: Text('Stablecoins')),
+          ],
+          child: Container(padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 18),
+            decoration: BoxDecoration(color: _panel,
+              borderRadius: BorderRadius.circular(14)),
+            child: Row(children: [
+              Text(_assetFilter, style: const TextStyle(fontSize: 12)),
+              const Icon(Icons.keyboard_arrow_down, size: 17),
+            ])),
+        ),
+      ]),
+      const SizedBox(height: 13),
       LayoutBuilder(builder: (context, constraints) {
-        const gap = 10.0;
+        const gap = 9.0;
         final columns = constraints.maxWidth > 680 ? 2 : 1;
         final cardWidth = (constraints.maxWidth - (columns - 1) * gap) / columns;
+        final visible = WalletListing.search(_assetSearch.text, filter: _assetFilter);
         return Wrap(spacing: gap, runSpacing: gap, children: [
-          for (final asset in ChainAsset.values)
-            SizedBox(width: cardWidth,
-              child: _assetCard(asset, compact: width < 380)),
+          for (final listing in visible)
+            SizedBox(width: cardWidth, child: _listingCard(listing)),
+          if (visible.isEmpty)
+            const Padding(padding: EdgeInsets.all(24),
+              child: Text('No matching assets. Try another coin or network.',
+                style: TextStyle(color: _muted))),
         ]);
       }),
+      const SizedBox(height: 12),
+      const Text('TON, SFP, MAG7.ssi and arbitrary tokens need verified contracts or separate chain integration. They are not silently added as spendable assets.',
+        style: TextStyle(color: _muted, fontSize: 11)),
       const SizedBox(height: 18),
       const _InfoBanner(icon: Icons.warning_amber_outlined,
         text: 'Review-only sending. USD total includes only the supported first-address balance checks (BTC, ETH, LTC, SOL, TRX and USDT by ERC-20/TRC-20). Provider failures make the estimate partial. Do NOT deposit funds before security review.'),
     ]);
   }
 
-  Widget _assetCard(ChainAsset asset, {bool compact = false}) {
-    final balance = _balances[asset];
-    final error = _balanceErrors[asset];
-    final price = _usdPrices[asset];
-    final numericBalance = double.tryParse(balance ?? '');
-    final validQuote = numericBalance != null && numericBalance >= 0 &&
-        numericBalance.isFinite && price != null && price.isFinite && price > 0;
-    final usdValue = validQuote ? numericBalance! * price! : null;
-    final expanded = _expandedAssets.contains(asset);
-    final quantity = _balancesVisible
-        ? balance == null ? '— ${asset.symbol}' : '$balance ${asset.symbol}'
-        : '•••• ${asset.symbol}';
-    final usdLabel = _balancesVisible
-        ? PortfolioSummary.formatUsd(usdValue)
-        : '••••';
-    final subtitle = error != null
-        ? 'Balance unavailable · tap for details'
-        : _refreshing && balance == null
-            ? 'Checking…'
-            : balance == null ? 'Not checked' : 'Confirmed · ${asset.network}';
-
+  Widget _listingCard(WalletListing listing) {
+    final asset = listing.trackedAsset;
+    final balance = asset == null ? null : _balances[asset];
+    final error = asset == null ? null : _balanceErrors[asset];
+    final quote = asset == null ? null : _usdPrices[asset];
+    final numeric = double.tryParse(balance ?? '');
+    final validPrice = numeric != null && numeric.isFinite && numeric >= 0 &&
+        quote != null && quote.isFinite && quote > 0;
+    final usdValue = validPrice ? numeric! * quote! : null;
+    final expanded = _expandedNetworks.contains(listing.network);
+    final quantity = !_balancesVisible ? '•••• ${listing.ticker}'
+      : balance == null ? '— ${listing.ticker}' : '$balance ${listing.ticker}';
+    final usdLabel = !_balancesVisible ? '••••' : PortfolioSummary.formatUsd(usdValue);
+    final subtitle = asset == null ? 'Address only · balance not indexed'
+      : error != null ? 'Balance unavailable · tap for details'
+      : _refreshing && balance == null ? 'Checking…'
+      : balance == null ? 'Not checked' : 'Balance checked';
     return Card(margin: EdgeInsets.zero,
       clipBehavior: Clip.antiAlias,
       child: Column(children: [
         InkWell(
           onTap: () => setState(() {
-            if (expanded) {
-              _expandedAssets.remove(asset);
-            } else {
-              _expandedAssets.add(asset);
-            }
+            if (expanded) { _expandedNetworks.remove(listing.network); }
+            else { _expandedNetworks.add(listing.network); }
           }),
-          child: Padding(padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 15),
+          child: Padding(padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 16),
             child: Row(children: [
-              CircleAvatar(radius: 21,
-                backgroundColor: asset.color.withValues(alpha: .15),
-                child: Text(asset.symbol[0], style: TextStyle(
-                  fontWeight: FontWeight.w900, fontSize: 18, color: asset.color))),
-              const SizedBox(width: 11),
-              Expanded(flex: 4, child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                Text(asset.name, maxLines: 1, overflow: TextOverflow.ellipsis,
+              CircleAvatar(radius: 23, backgroundColor: listing.color.withValues(alpha: .14),
+                child: Text(listing.ticker.substring(0, 1),
+                  style: TextStyle(color: listing.color, fontSize: 18,
+                    fontWeight: FontWeight.w900))),
+              const SizedBox(width: 12),
+              Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Text('${listing.ticker} (${listing.networkTag})',
+                  maxLines: 1, overflow: TextOverflow.ellipsis,
                   style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 15)),
                 const SizedBox(height: 4),
                 Text(subtitle, maxLines: 1, overflow: TextOverflow.ellipsis,
-                  style: TextStyle(color: error == null ? _muted : Colors.orangeAccent,
-                    fontSize: 10)),
+                  style: TextStyle(fontSize: 10,
+                    color: error != null || asset == null ? Colors.orangeAccent : _muted)),
               ])),
-              const SizedBox(width: 8),
-              Expanded(flex: compact ? 4 : 5,
-                child: Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
-                  FittedBox(fit: BoxFit.scaleDown, alignment: Alignment.centerRight,
-                    child: Text(quantity, style: const TextStyle(
-                      fontWeight: FontWeight.w800, fontSize: 15))),
-                  const SizedBox(height: 4),
-                  Text(usdLabel, style: const TextStyle(color: _muted, fontSize: 12)),
-                ])),
-              const SizedBox(width: 5),
+              const SizedBox(width: 6),
+              Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
+                Text(quantity, style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 14)),
+                Text(usdLabel, style: const TextStyle(color: _muted, fontSize: 11)),
+              ]),
+              const SizedBox(width: 4),
               Icon(expanded ? Icons.keyboard_arrow_up : Icons.keyboard_arrow_down,
-                color: _muted, size: 19),
+                size: 18, color: _muted),
             ])),
         ),
         if (expanded) ...[
           const Divider(height: 1),
-          Padding(padding: const EdgeInsets.fromLTRB(14, 13, 14, 15),
+          Padding(padding: const EdgeInsets.fromLTRB(14, 12, 14, 15),
             child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Text(asset.network, style: const TextStyle(color: _muted, fontSize: 11)),
+              Text(listing.network.caution,
+                style: const TextStyle(fontSize: 11, color: _muted)),
               if (error != null) ...[
-                const SizedBox(height: 7),
-                SelectableText(error, style: const TextStyle(
-                  color: Colors.orangeAccent, fontSize: 11)),
+                const SizedBox(height: 8),
+                SelectableText(error,
+                  style: const TextStyle(color: Colors.orangeAccent, fontSize: 11)),
               ],
-              const SizedBox(height: 8),
-              SelectableText(_addresses!.of(asset),
-                style: const TextStyle(fontSize: 12, color: Color(0xFFCCDFDF))),
+              const SizedBox(height: 10),
+              SelectableText(listing.addressOf(_addresses!),
+                style: const TextStyle(fontSize: 12)),
               const SizedBox(height: 12),
               Row(children: [
                 Expanded(child: OutlinedButton.icon(
-                  onPressed: () => _copyAddress(asset),
-                  icon: const Icon(Icons.copy, size: 16), label: const Text('Copy'),
-                  style: OutlinedButton.styleFrom(minimumSize: const Size.fromHeight(42)))),
-                const SizedBox(width: 9),
+                  onPressed: () => _copyNetworkAddress(listing.network),
+                  icon: const Icon(Icons.copy, size: 15), label: const Text('Copy'))),
+                const SizedBox(width: 6),
                 Expanded(child: OutlinedButton.icon(
-                  onPressed: () => setState(() { _selected = asset; _receiveNetwork = _networkForAsset(asset); _tab = 1; }),
-                  icon: const Icon(Icons.qr_code, size: 16), label: const Text('Receive'),
-                  style: OutlinedButton.styleFrom(minimumSize: const Size.fromHeight(42)))),
+                  onPressed: () => setState(() {
+                    _receiveNetwork = listing.network;
+                    _tab = 1;
+                  }),
+                  icon: const Icon(Icons.qr_code, size: 15), label: const Text('Receive'))),
+                const SizedBox(width: 6),
+                Expanded(child: OutlinedButton.icon(
+                  onPressed: () => setState(() {
+                    _sendNetwork = listing.network;
+                    _tab = 2;
+                  }),
+                  icon: const Icon(Icons.send_outlined, size: 14), label: const Text('Send'))),
               ]),
             ])),
         ],
@@ -792,12 +986,22 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
               title: Text('Encrypted device storage'), subtitle: Text('Uses Flutter Secure Storage, backed by OS protected encryption.')),
           const Divider(),
           const ListTile(contentPadding: EdgeInsets.zero, leading: Icon(Icons.gpp_maybe_outlined, color: Colors.orangeAccent),
-              title: Text('Important security limitations'), subtitle: Text('No app PIN, device authentication, memory zeroization, external audit or hardware-wallet integration yet.')),
+              title: Text('Important security limitations'), subtitle: Text('Uses phone PIN/fingerprint to unlock, but memory zeroization, independent audit and hardware-wallet integration are not implemented.')),
           const Divider(),
           const ListTile(contentPadding: EdgeInsets.zero, leading: Icon(Icons.public, color: Colors.lightBlueAccent),
               title: Text('Public balance checks'), subtitle: Text('On wallet open, every 5 minutes while foregrounded, and when Refresh is tapped, public addresses go to blockchain providers. USD market quotes come from CoinGecko. No recovery words are sent.')),
           const SizedBox(height: 12),
-          OutlinedButton.icon(onPressed: _showRecoveryPhrase, icon: const Icon(Icons.visibility_outlined), label: const Text('Reveal recovery words'),
+          OutlinedButton.icon(onPressed: _showRecoveryPhrase,
+              icon: const Icon(Icons.visibility_outlined), label: const Text('Reveal recovery words'),
+              style: OutlinedButton.styleFrom(minimumSize: const Size.fromHeight(49))),
+          const SizedBox(height: 8),
+          OutlinedButton.icon(onPressed: _verifyOfflineBackup,
+              icon: const Icon(Icons.fact_check_outlined),
+              label: Text(_backupVerified ? 'Backup verified · Check again' : 'Verify offline backup'),
+              style: OutlinedButton.styleFrom(minimumSize: const Size.fromHeight(49))),
+          const SizedBox(height: 8),
+          OutlinedButton.icon(onPressed: _lock, icon: const Icon(Icons.lock_clock),
+              label: const Text('Lock wallet now'),
               style: OutlinedButton.styleFrom(minimumSize: const Size.fromHeight(49))),
         ]))),
       const SizedBox(height: 20),
@@ -813,7 +1017,7 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
         label: const Text('Delete wallet from this device', style: TextStyle(color: Colors.redAccent)),
         style: OutlinedButton.styleFrom(minimumSize: const Size.fromHeight(50))),
       const SizedBox(height: 20),
-      const Text('v0.8 receive addresses + review-only send · Not audited · No warranty. Keep an offline recovery backup.', style: TextStyle(color: _muted, fontSize: 11)),
+      const Text('v1.0 personal foundation · Sending remains disabled pending audits and on-chain test transfers. Keep an offline recovery backup.', style: TextStyle(color: _muted, fontSize: 11)),
     ]);
   }
 

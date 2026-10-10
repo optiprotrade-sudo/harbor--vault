@@ -1,0 +1,66 @@
+HARBOR VAULT v0.9 — EXISTING GITHUB REPOSITORY UPDATE
+===================================================
+This patch is cumulative. It includes TRON / USDT TRC-20 from v0.8 AND the new
+v0.9 asset catalog + screenshot-inspired Send interface. It is suitable for
+updating a v0.7 or v0.8 source tree (NOT for installing over a live funds wallet).
+
+IMPORTANT: This ZIP contains SOURCE FILES, NOT AN APK.
+DO NOT upload the ZIP as a single file.
+DO NOT erase your existing repository or its history.
+DO NOT type or commit a recovery phrase or private key into GitHub.
+
+EASIEST: from your repository's main page, Add file > Upload files; drag the
+CONTENTS of the extracted patch folder onto GitHub. Ensure paths are at the
+repository root: e.g. lib/main.dart (not v09_patch/lib/main.dart).
+If GitHub won't replace files via browser upload, open each existing file,
+click pencil, paste replacement contents, and Commit. Create any NEW files
+with Add file > Create new file using their complete relative paths.
+
+WHAT THIS UPDATE REPLACES / ADDS (relative to repository root):
+- lib/main.dart
+- lib/models/asset.dart
+- lib/models/receive_network.dart
+- lib/models/wallet_listing.dart (NEW)
+- lib/screens/send_screen.dart
+- lib/services/balance_service.dart
+- lib/services/fee_service.dart
+- lib/services/price_service.dart
+- lib/services/wallet_engine.dart
+- pubspec.yaml
+- test/balance_service_test.dart
+- test/fee_service_test.dart
+- test/price_service_test.dart
+- test/receive_network_test.dart
+- test/wallet_engine_test.dart
+- test/wallet_listing_test.dart (NEW)
+- .github/workflows/build-android-apk.yml (only update the APK artifact label)
+
+CHECK BEFORE RUNNING:
+1. GitHub shows pubspec.yaml version: 0.9.0+9
+2. lib/models/receive_network.dart contains usdtTrc20 and usdcBase
+3. lib/models/wallet_listing.dart contains 'USDT', 'TRC-20'
+4. lib/screens/send_screen.dart shows 'Next · Review only'
+5. GitHub Actions workflow is in .github/workflows/ (NOT plain workflows/)
+6. Do not delete your previously backed-up recovery phrase.
+
+BUILD:
+GitHub Actions > Build Harbor Vault Android APK > Run workflow (main).
+If successful: run page > Artifacts > Harbor-Vault-Android-APK-v0.9.
+Artifact is an archive: extract the APK before attempting phone installation.
+Do not uninstall an existing wallet unless your recovery phrase is safely backed
+up OFFLINE. Future releases should use a stable signing key before normal updates.
+
+FEATURE LIMITS:
+- No real signing or broadcast. Review-screen only.
+- BTC/LTC low/standard/high are FEERATE-based planning estimates for illustrative
+  transaction sizes; exact UTXO fees are not calculated.
+- EVM standard gas-price estimate is approximate; L2 posting fees and token
+  execution amounts are not known. TRON Energy/Bandwidth not estimated.
+- TRC-20 is a TRON (T...) address, separate from Ethereum.
+- ETH, BNB, USDC, USDT and other EVM address-preview networks may share an EVM
+  account address; their balances, tokens, and fees are NOT pooled.
+- Only the seven ChainAsset balances are indexed. Other displayed entries
+  are address previews, NOT send-ready wallets or balances.
+- TON / GRAM, SFP BEP20, MAG7.ssi and other exotic tokens NOT added without
+  verifying the chain-specific key derivation or authentic token contract.
+- This prototype is NOT independently security audited. Do not fund with real coins.

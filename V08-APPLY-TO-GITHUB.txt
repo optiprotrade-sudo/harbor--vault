@@ -1,0 +1,55 @@
+HARBOR VAULT v0.8 - TRC-20 USDT + BTC BALANCE RETRY
+
+BEFORE YOU START:
+- Keep a correct recovery phrase BACKED UP OFFLINE. Do not share it or put it in GitHub.
+- Do not uninstall your existing app until you've confirmed that recovery works;
+  APK signing certificates may differ between GitHub runs. Updating normally preserves local data.
+- This is STILL an unaudited, receive/review-only prototype. No mainnet funds.
+
+HOW TO UPDATE YOUR EXISTING PRIVATE GITHUB REPOSITORY:
+1. Download and EXTRACT the v0.8 GitHub Patch ZIP on your computer.
+2. Browse to the root of your PRIVATE GitHub repository (main branch).
+3. For each file listed below: find/create that exact path on GitHub, replace its full
+   contents with the file from the extracted ZIP, and COMMIT. Do not upload the ZIP itself.
+4. Do NOT create an extra enclosing folder such as "Harbor-Vault-v0.8-Patch" in the repo.
+5. Once every file is committed, run Actions > Build Harbor Vault Android APK > Run workflow.
+6. The workflow runs Flutter tests first. If it fails, capture its FIRST red error.
+7. On success download the Artifact ZIP, extract app-release.apk, then install for testing.
+
+FILES TO REPLACE IN GITHUB:
+  .github/workflows/build-android-apk.yml
+  pubspec.yaml
+  lib/main.dart
+  lib/models/asset.dart
+  lib/models/receive_network.dart
+  lib/screens/send_screen.dart
+  lib/services/balance_service.dart
+  lib/services/fee_service.dart
+  lib/services/price_service.dart
+  lib/services/wallet_engine.dart
+  test/balance_service_test.dart
+  test/fee_service_test.dart
+  test/price_service_test.dart
+  test/receive_network_test.dart
+  test/wallet_engine_test.dart
+
+WHAT CHANGED:
+- Added TRON mainnet native TRX and TRON USDT TRC-20 as distinct, tracked assets.
+- TRON address comes from the *distinct* m/44'/195'/0'/0/0 seed path, secp256k1,
+  0x41 prefix and double-SHA256 Base58Check. TRX and TRC-20 use this same T... address.
+- USDT TRC-20 token balance queries TronGrid, using Tether's real TRON USDT contract
+  TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t (6 decimals).
+- Bitcoin retries Blockstream Esplora if mempool.space fails/rate-limits.
+- On failure, expand the coin card to see short provider diagnostics;
+  provider failure is not replaced by a fake zero balance.
+- CoinGecko includes TRX USD estimates; USDT ERC-20 and TRC-20 have separate balances.
+- TRON fees are NOT quoted without dynamic Energy/Bandwidth simulation.
+- Real-money sending and signing remain disabled.
+
+SAFETY:
+- TRON T... address is NOT an Ethereum ERC-20 0x... address.
+- Test wallet restoration/derivation with known vectors and another compatible wallet,
+  using EMPTY test wallets, before considering a real deposit.
+- Public providers have rate limits and may need an API key. A provider error does not
+  mean funds are missing. Only first address of account 0 is currently checked.
+- APK has NOT been compiled or security-audited here; GitHub Actions must test it.

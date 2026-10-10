@@ -1,15 +1,26 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import '../models/asset.dart';
 import '../models/receive_network.dart';
+import '../models/wallet_listing.dart';
 import '../services/fee_service.dart';
 
-/// A review-only transaction builder. It NEVER constructs, signs, or broadcasts.
-/// Real-money signing and spendable-balance checks are intentionally absent.
+const _background = Color(0xFF071319);
+const _panel = Color(0xFF15262C);
+const _mint = Color(0xFF8DF0CB);
+const _muted = Color(0xFF9DB1B5);
+
+/// Screenshot-inspired send interface. Explicitly REVIEW-ONLY: the app does
+/// not create, sign or broadcast a transaction and never reads a private key.
 class SendScreen extends StatefulWidget {
   final PublicAddresses addresses;
+  final String walletName;
   final ReceiveNetwork initialNetwork;
+  final Map<ChainAsset, String> balances;
+  final Map<ChainAsset, double> usdPrices;
   const SendScreen({super.key, required this.addresses,
-    this.initialNetwork = ReceiveNetwork.ethereum});
+    this.walletName = 'My Harbor Wallet', this.initialNetwork = ReceiveNetwork.bitcoin,
+    this.balances = const {}, this.usdPrices = const {}});
 
   @override
   State<SendScreen> createState() => _SendScreenState();
@@ -20,163 +31,372 @@ class _SendScreenState extends State<SendScreen> {
   final _recipient = TextEditingController();
   final _amount = TextEditingController();
   late ReceiveNetwork _network;
+  FeePriority _priority = FeePriority.standard;
   FeeQuote? _quote;
   String? _feeError;
   bool _loading = false;
-  int _requestSequence = 0;
+  int _sequence = 0;
+
+  WalletListing get _entry => WalletListing.forNetwork(_network);
+  bool get _tieredFees => _network == ReceiveNetwork.bitcoin ||
+      _network == ReceiveNetwork.litecoin;
 
   @override
   void initState() {
     super.initState();
     _network = widget.initialNetwork;
+    _amount.addListener(_redrawAmount);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _estimate();
+    });
   }
+
+  void _redrawAmount() { if (mounted) setState(() {}); }
 
   @override
   void dispose() {
-    _requestSequence++;
+    _sequence++;
+    _amount.removeListener(_redrawAmount);
     _feeService.dispose();
     _recipient.dispose();
     _amount.dispose();
     super.dispose();
   }
 
+  void _select(ReceiveNetwork choice) {
+    if (_network == choice) return;
+    ++_sequence;
+    _recipient.clear();
+    _amount.clear();
+    setState(() {
+      _network = choice;
+      _priority = FeePriority.standard;
+      _quote = null;
+      _feeError = null;
+      _loading = false;
+    });
+    _estimate();
+  }
+
   Future<void> _estimate() async {
-    final request = ++_requestSequence;
-    setState(() { _loading = true; _feeError = null; _quote = null; });
+    final request = ++_sequence;
+    setState(() { _loading = true; _quote = null; _feeError = null; });
     try {
-      final quote = await _feeService.estimate(_network);
-      if (!mounted || request != _requestSequence) return;
+      final quote = await _feeService.estimate(_network, priority: _priority);
+      if (!mounted || request != _sequence) return;
       setState(() => _quote = quote);
     } catch (_) {
-      if (!mounted || request != _requestSequence) return;
-      setState(() => _feeError =
-          (_network == ReceiveNetwork.tron || _network == ReceiveNetwork.usdtTrc20)
-              ? 'TRON fee calculation not implemented: needs Energy/Bandwidth estimation and any applicable TRX burn. No fee has been assumed.'
-              : 'Fee estimate unavailable from provider. No fee has been assumed.');
+      if (!mounted || request != _sequence) return;
+      setState(() => _feeError = _network == ReceiveNetwork.tron ||
+          _network == ReceiveNetwork.usdtTrc20
+          ? 'TRON Energy/Bandwidth estimation not implemented. TRX may be required.'
+          : 'Network fee unavailable. No zero fee is assumed.');
     } finally {
-      if (mounted && request == _requestSequence) setState(() => _loading = false);
+      if (mounted && request == _sequence) setState(() => _loading = false);
     }
   }
 
-  bool _looksLikeRecipient(String value) {
-    final address = value.trim();
-    if (_network.isEvm) return RegExp(r'^0x[0-9a-fA-F]{40}$').hasMatch(address);
+  String _shortAddress(String address) => address.length > 16
+      ? '${address.substring(0, 7)}…${address.substring(address.length - 5)}'
+      : address;
+
+  String? get _balance => _entry.trackedAsset == null
+      ? null : widget.balances[_entry.trackedAsset];
+
+  String get _available => _balance == null
+      ? 'Balance not verified'
+      : 'Reported balance: $_balance ${_entry.ticker}';
+
+  String get _usdEquivalent {
+    final price = widget.usdPrices[_entry.trackedAsset];
+    final amount = double.tryParse(_amount.text);
+    if (price == null || amount == null || !amount.isFinite || amount <= 0) {
+      return '—';
+    }
+    return '\$${(amount * price).toStringAsFixed(2)}';
+  }
+
+  Future<void> _paste() async {
+    final data = await Clipboard.getData('text/plain');
+    final text = data?.text?.trim();
+    if (text == null || text.isEmpty) {
+      _message('Clipboard has no text address.');
+      return;
+    }
+    _recipient.text = text;
+    _message('Address pasted. Check both the address and network.');
+  }
+
+  void _message(String text) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(text)));
+  }
+
+  bool _recipientFormatHint(String address) {
+    final text = address.trim();
+    if (_network.isEvm) return RegExp(r'^0x[0-9a-fA-F]{40}$').hasMatch(text);
     switch (_network) {
       case ReceiveNetwork.bitcoin:
-        return address.startsWith('bc1') && address.length >= 14 && address.length <= 90;
+        return RegExp(r'^bc1[ac-hj-np-z02-9]{11,87}$').hasMatch(text);
       case ReceiveNetwork.litecoin:
-        return address.startsWith('ltc1') && address.length >= 14 && address.length <= 90;
+        return RegExp(r'^ltc1[ac-hj-np-z02-9]{11,87}$').hasMatch(text);
       case ReceiveNetwork.solana:
-        return RegExp(r'^[1-9A-HJ-NP-Za-km-z]{32,44}$').hasMatch(address);
+        return RegExp(r'^[1-9A-HJ-NP-Za-km-z]{32,44}$').hasMatch(text);
       case ReceiveNetwork.tron:
       case ReceiveNetwork.usdtTrc20:
-        // Format hint only; checksum validation needed before any live sends.
-        return RegExp(r'^T[1-9A-HJ-NP-Za-km-z]{33}$').hasMatch(address);
+        return RegExp(r'^T[1-9A-HJ-NP-Za-km-z]{33}$').hasMatch(text);
       default:
         return false;
     }
   }
 
   Future<void> _review() async {
-    final amount = _amount.text.trim();
-    if (!RegExp(r'^(?:[0-9]+)(?:\.[0-9]+)?$').hasMatch(amount) ||
-        (double.tryParse(amount) ?? 0) <= 0) {
-      _message('Enter a positive numeric amount.');
+    final amountText = _amount.text.trim();
+    final amount = double.tryParse(amountText);
+    if (amount == null || !amount.isFinite || amount <= 0 ||
+        !RegExp(r'^\d+(\.\d+)?$').hasMatch(amountText)) {
+      _message('Enter a positive amount. No transaction was submitted.');
       return;
     }
-    if (!_looksLikeRecipient(_recipient.text)) {
-      _message('Address format is not recognized for this network. No funds have moved.');
+    if (!_recipientFormatHint(_recipient.text)) {
+      _message('The recipient format does not match this network.');
       return;
     }
-    // Format checks are insufficient for a live transaction. Never submit.
+    if (!mounted) return;
     await showDialog<void>(context: context, builder: (ctx) => AlertDialog(
-      title: const Text('Transaction review · TEST ONLY'),
+      title: const Text('Review transfer · simulation'),
       content: SingleChildScrollView(child: Column(
-        mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text('Network: ${_network.label}'),
-          const SizedBox(height: 8),
-          Text('Amount: $amount ${_network.transferTicker}'),
-          const SizedBox(height: 8),
-          const Text('Recipient:'),
+          _reviewLine('Asset', '${_entry.ticker} (${_entry.networkTag})'),
+          _reviewLine('Amount', '$amountText ${_entry.ticker}'),
+          _reviewLine('USD equivalent', _usdEquivalent),
+          _reviewLine('Fee estimate', _quote?.estimate ?? 'Unavailable'),
+          const SizedBox(height: 12),
+          const Text('To address', style: TextStyle(color: _muted)),
+          const SizedBox(height: 5),
           SelectableText(_recipient.text.trim()),
-          const SizedBox(height: 12),
-          Text('Indicative fee: ${_quote?.estimate ?? 'Unavailable'}'),
-          const SizedBox(height: 12),
-          const Text('BROADCAST DISABLED. No keys are accessed or used to sign. TRON fees require Energy/Bandwidth and potentially TRX; no fee is invented if unavailable.',
-            style: TextStyle(color: Colors.orangeAccent)),
+          const SizedBox(height: 16),
+          const Text('TEST ONLY · No coins are sent. Recipient checks are only format hints, not full checksums or token contract verification. No private keys are used.',
+            style: TextStyle(color: Colors.orangeAccent, fontSize: 12)),
         ],
       )),
       actions: [
-        TextButton(onPressed: () => Navigator.of(ctx).pop(), child: const Text('Close review')),
+        TextButton(onPressed: () => Navigator.of(ctx).pop(), child: const Text('Close')),
         const FilledButton(onPressed: null, child: Text('Broadcast disabled')),
       ],
     ));
   }
 
-  void _message(String msg) {
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+  Widget _reviewLine(String title, String value) => Padding(
+    padding: const EdgeInsets.symmetric(vertical: 5),
+    child: Row(children: [
+      Expanded(child: Text(title, style: const TextStyle(color: _muted))),
+      Flexible(child: Text(value, textAlign: TextAlign.right,
+        style: const TextStyle(fontWeight: FontWeight.bold))),
+    ]),
+  );
+
+  Future<void> _chooseCoin() async {
+    final search = TextEditingController();
+    final choice = await showModalBottomSheet<ReceiveNetwork>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: _background,
+      builder: (sheetContext) => StatefulBuilder(builder: (ctx, refreshSheet) {
+        final results = WalletListing.search(search.text);
+        return SafeArea(child: Padding(
+          padding: EdgeInsets.fromLTRB(16, 16, 16,
+            MediaQuery.viewInsetsOf(ctx).bottom + 12),
+          child: SizedBox(height: MediaQuery.sizeOf(ctx).height * 0.72,
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Row(children: [
+                const Expanded(child: Text('Choose coin & network',
+                  style: TextStyle(fontSize: 21, fontWeight: FontWeight.w800))),
+                IconButton(icon: const Icon(Icons.close), onPressed: () => Navigator.pop(ctx)),
+              ]),
+              const SizedBox(height: 10),
+              TextField(controller: search, onChanged: (_) => refreshSheet(() {}),
+                autofocus: false,
+                decoration: const InputDecoration(hintText: 'Search BTC, USDT, TRC-20, Base…',
+                  prefixIcon: Icon(Icons.search))),
+              const SizedBox(height: 10),
+              Expanded(child: ListView.separated(
+                itemCount: results.length,
+                separatorBuilder: (_, __) => const Divider(height: 1, color: Color(0xFF24393F)),
+                itemBuilder: (ctx, index) {
+                  final entry = results[index];
+                  return ListTile(
+                    leading: CircleAvatar(backgroundColor: entry.color.withValues(alpha: .16),
+                      child: Text(entry.ticker.substring(0, 1),
+                        style: TextStyle(color: entry.color, fontWeight: FontWeight.w900))),
+                    title: Text('${entry.ticker} (${entry.networkTag})'),
+                    subtitle: Text(entry.name, style: const TextStyle(color: _muted)),
+                    trailing: entry.network == _network
+                      ? const Icon(Icons.check_circle, color: _mint) : const Icon(Icons.chevron_right),
+                    onTap: () => Navigator.pop(ctx, entry.network),
+                  );
+                },
+              )),
+            ])),
+        ));
+      }),
+    );
+    search.dispose();
+    if (choice != null && mounted) _select(choice);
+  }
+
+  Widget _feeChoice(String name, FeePriority? priority) {
+    final enabled = priority != null && (_tieredFees || priority == FeePriority.standard);
+    final active = enabled && _priority == priority;
+    return Expanded(child: InkWell(
+      onTap: enabled && !_loading ? () { setState(() => _priority = priority!); _estimate(); } : null,
+      borderRadius: BorderRadius.circular(12),
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 4),
+        decoration: BoxDecoration(
+          color: active ? const Color(0xFF273938) : _background,
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: active ? _mint : const Color(0xFF35474D)),
+        ),
+        child: Column(children: [
+          Text(name, style: TextStyle(color: enabled ? Colors.white : _muted,
+            fontWeight: FontWeight.w700, fontSize: 12)),
+          const SizedBox(height: 6),
+          Text(priority == null ? 'Later' : enabled ? (active ? 'Selected' : 'Choose') : 'N/A',
+            style: const TextStyle(color: _muted, fontSize: 10)),
+        ]),
+      ),
+    ));
   }
 
   @override
   Widget build(BuildContext context) => Column(
     crossAxisAlignment: CrossAxisAlignment.start,
     children: [
-      const Text('Send cryptocurrency', style: TextStyle(fontSize: 28, fontWeight: FontWeight.w800)),
-      const SizedBox(height: 10),
-      const Text('Review mode only. This build cannot send funds yet.',
-        style: TextStyle(color: Colors.amberAccent)),
+      const Text('Send', style: TextStyle(fontSize: 29, fontWeight: FontWeight.w900)),
+      const SizedBox(height: 6),
+      const Text('REVIEW MODE · Sending disabled until security testing is complete',
+        style: TextStyle(color: Colors.orangeAccent, fontSize: 11)),
       const SizedBox(height: 22),
-      DropdownButtonFormField<ReceiveNetwork>(
-        value: _network,
-        isExpanded: true,
-        decoration: const InputDecoration(labelText: 'Coin and network'),
-        items: ReceiveNetwork.values.map((n) => DropdownMenuItem(
-          value: n, child: Text('${n.label} · ${n.transferTicker}', overflow: TextOverflow.ellipsis),
-        )).toList(),
-        onChanged: (selected) {
-          if (selected == null) return;
-          _requestSequence++;
-          setState(() { _network = selected; _quote = null; _feeError = null; _loading = false; });
-        },
+      Container(
+        decoration: BoxDecoration(color: _panel, borderRadius: BorderRadius.circular(15)),
+        padding: const EdgeInsets.all(15),
+        child: Row(children: [
+          const Icon(Icons.account_balance_wallet_outlined, color: _mint, size: 22),
+          const SizedBox(width: 10),
+          Expanded(child: Text(widget.walletName, style: const TextStyle(fontWeight: FontWeight.w700))),
+          SelectableText(_shortAddress(_network.addressOf(widget.addresses)),
+            style: const TextStyle(color: _muted, fontSize: 12)),
+        ]),
       ),
       const SizedBox(height: 16),
+      InkWell(onTap: _chooseCoin, borderRadius: BorderRadius.circular(15),
+        child: Container(
+          padding: const EdgeInsets.all(17),
+          decoration: BoxDecoration(color: _panel, borderRadius: BorderRadius.circular(15)),
+          child: Row(children: [
+            CircleAvatar(radius: 25, backgroundColor: _entry.color.withValues(alpha: .18),
+              child: Text(_entry.ticker[0], style: TextStyle(color: _entry.color,
+                fontSize: 21, fontWeight: FontWeight.w900))),
+            const SizedBox(width: 14),
+            Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text(_entry.ticker, style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w800)),
+              Text('${_entry.name} · ${_entry.networkTag}',
+                style: const TextStyle(color: _muted, fontSize: 12)),
+            ])),
+            const Icon(Icons.chevron_right, color: _muted),
+          ]),
+        )),
+      const SizedBox(height: 22),
+      Row(children: [
+        const Expanded(child: Text('To', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800))),
+        const Icon(Icons.qr_code_scanner, color: _muted, size: 20),
+        const SizedBox(width: 6),
+        const Text('Scanner later', style: TextStyle(color: _muted, fontSize: 11)),
+      ]),
+      const SizedBox(height: 9),
       TextField(controller: _recipient, autocorrect: false, enableSuggestions: false,
-        keyboardType: TextInputType.text,
-        decoration: const InputDecoration(labelText: 'Recipient address', hintText: 'Paste the recipient address')),
-      const SizedBox(height: 14),
+        keyboardType: TextInputType.text, maxLines: 2, minLines: 1,
+        decoration: InputDecoration(hintText: 'Enter or paste recipient address',
+          suffixIcon: TextButton(onPressed: _paste,
+            child: const Text('Paste', style: TextStyle(color: _mint, fontWeight: FontWeight.w800))))),
+      const SizedBox(height: 20),
+      const Text('Amount', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800)),
+      const SizedBox(height: 10),
       TextField(controller: _amount, keyboardType: const TextInputType.numberWithOptions(decimal: true),
-        decoration: InputDecoration(labelText: 'Amount (${_network.transferTicker})')),
-      const SizedBox(height: 18),
-      Card(child: Padding(padding: const EdgeInsets.all(18), child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start, children: [
-          const Text('Network fee estimate', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
-          const SizedBox(height: 8),
+        inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'[0-9.]'))],
+        decoration: InputDecoration(hintText: '0.00',
+          suffixIcon: SizedBox(width: 119, child: Row(mainAxisSize: MainAxisSize.min, children: [
+            InkWell(onTap: () => _message('MAX requires verified spendable funds and network-fee deductions; not yet available.'),
+              child: const Padding(padding: EdgeInsets.all(7), child: Text('MAX',
+                style: TextStyle(color: _mint, fontWeight: FontWeight.w800)))),
+            Expanded(child: Text(_entry.ticker, textAlign: TextAlign.center,
+              style: const TextStyle(fontSize: 12))),
+          ])))),
+      const SizedBox(height: 10),
+      Container(padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
+        decoration: BoxDecoration(color: _panel, borderRadius: BorderRadius.circular(14)),
+        child: Row(children: [
+          Expanded(child: Text(_usdEquivalent, style: const TextStyle(color: _muted))),
+          const Text('USD', style: TextStyle(color: _muted)),
+        ])),
+      const SizedBox(height: 8),
+      Text(_available, style: const TextStyle(color: _muted, fontSize: 12)),
+      if (!_entry.isIndexed) ...[
+        const SizedBox(height: 7),
+        const Text('Address preview only · Token or network balance indexing is not implemented.',
+          style: TextStyle(color: Colors.orangeAccent, fontSize: 11)),
+      ],
+      const SizedBox(height: 23),
+      Container(padding: const EdgeInsets.all(15),
+        decoration: BoxDecoration(color: _panel, borderRadius: BorderRadius.circular(15)),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Row(children: [
+            const Expanded(child: Text('Network Fee',
+              style: TextStyle(fontWeight: FontWeight.w800, fontSize: 17))),
+            if (_loading) const SizedBox(height: 18, width: 18,
+              child: CircularProgressIndicator(strokeWidth: 2))
+            else IconButton(onPressed: _estimate, tooltip: 'Refresh fee estimate',
+              icon: const Icon(Icons.refresh, size: 20, color: _mint)),
+          ]),
+          const SizedBox(height: 6),
           if (_quote != null) ...[
-            SelectableText(_quote!.estimate, style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w800)),
-            const SizedBox(height: 8),
-            Text(_quote!.live ? 'Live fee-rate input · planning estimate' : 'Fixed planning illustration · not live',
-              style: const TextStyle(color: Colors.amberAccent)),
-            const SizedBox(height: 7),
-            Text(_quote!.detail),
-          ] else if (_feeError != null)
-            Text(_feeError!, style: const TextStyle(color: Colors.orangeAccent))
-          else
-            const Text('Tap Estimate fee to request public network data. Fees are not fixed.'),
+            Text(_quote!.estimate, style: const TextStyle(color: _mint,
+              fontWeight: FontWeight.w900, fontSize: 18)),
+            const SizedBox(height: 4),
+            Text(_quote!.live ? 'Live network rate · approximate transfer size'
+              : 'Illustration only · not a live fee',
+              style: const TextStyle(color: _muted, fontSize: 11)),
+          ] else Text(_feeError ?? 'Checking provider…',
+            style: const TextStyle(color: Colors.orangeAccent, fontSize: 12)),
           const SizedBox(height: 12),
-          OutlinedButton.icon(onPressed: _loading ? null : _estimate,
-            icon: _loading ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
-              : const Icon(Icons.calculate_outlined),
-            label: Text(_loading ? 'Checking network…' : 'Estimate fee')),
-        ],
-      ))),
-      const SizedBox(height: 16),
-      const Text('For safety, this version does not broadcast transactions, verify spendable balances, calculate exact total fees or scan QR codes. Never use its estimate as final authorization.',
-        style: TextStyle(color: Colors.white70, fontSize: 12)),
-      const SizedBox(height: 18),
-      ElevatedButton.icon(onPressed: _review,
-        icon: const Icon(Icons.fact_check_outlined),
-        label: const Text('Review transfer · no sending')),
+          Row(children: [
+            _feeChoice('Low', FeePriority.low),
+            const SizedBox(width: 6),
+            _feeChoice('Standard', FeePriority.standard),
+            const SizedBox(width: 6),
+            _feeChoice('High', FeePriority.high),
+            const SizedBox(width: 6),
+            _feeChoice('Custom', null),
+          ]),
+          if (_quote != null) ...[
+            const SizedBox(height: 12),
+            Text(_quote!.detail, style: const TextStyle(color: _muted, fontSize: 11)),
+          ],
+        ])),
+      const SizedBox(height: 17),
+      Text(_network.caution, style: const TextStyle(color: _muted, fontSize: 11)),
+      const SizedBox(height: 23),
+      SizedBox(width: double.infinity, child: FilledButton(
+        onPressed: _review,
+        style: FilledButton.styleFrom(backgroundColor: const Color(0xFF7169F8),
+          foregroundColor: Colors.white, padding: const EdgeInsets.symmetric(vertical: 16)),
+        child: const Text('Next · Review only',
+          style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800)),
+      )),
+      const SizedBox(height: 10),
     ],
   );
 }

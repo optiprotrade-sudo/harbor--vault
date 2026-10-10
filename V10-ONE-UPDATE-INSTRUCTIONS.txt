@@ -1,0 +1,18 @@
+HARBOR VAULT v1.0 — ONE GITHUB UPDATE
+
+Your phone showed version v0.8. The v1.0 changes are not on that phone until you build AND install an updated APK.
+
+OPTION A — One Git push (recommended if Git for Windows is installed):
+1. Unzip Harbor-Vault-v1.0-Consolidated-Source.zip on Windows.
+2. Double-click PUSH-TO-GITHUB.bat and approve the upload when prompted.
+3. Sign in to your GitHub account if Git Credential Manager requests it.
+4. The script clones your private harbor--vault repository, copies changed source and workflow files, commits ONCE and pushes ONCE. This does not upload your phone wallet or recovery phrase.
+5. Run your GitHub Actions APK workflow once, then download the new artifact.
+
+OPTION B — GitHub website (if Git is not installed):
+1. Extract the ZIP. Open your harbor--vault repository in GitHub.
+2. Replace project folders lib/, test/, scripts/, and .github/workflows/ with those in the extracted ZIP, preserving all nested paths; replace pubspec.yaml too.
+3. Commit all changes to main, then run the GitHub Actions workflow.
+   GitHub web uploads can be cumbersome when updating existing filenames; Git or GitHub Desktop is easier for many files.
+
+WARNING: NEVER upload actual recovery phrases, private keys, keystores, wallet databases, passwords, or APK signing secrets to GitHub. None are needed for this repository update. Keep real funds out of this unaudited beta.

@@ -1,0 +1,29 @@
+HARBOR VAULT v0.6: APPLY TO THE EXISTING PRIVATE GITHUB REPO
+==============================================================
+
+1. Extract Harbor-Vault-v0.6-GitHub-Patch.zip on your PC.
+2. Sign in to github.com and open optiprotrade-sudo/harbor--vault > Code (main).
+3. Replace these EXISTING files with same relative paths:
+      lib/main.dart
+      lib/services/balance_service.dart
+      pubspec.yaml
+      test/balance_service_test.dart
+4. ADD these NEW files with Add file > Create new file and paste their content:
+      lib/services/price_service.dart
+      lib/services/portfolio_summary.dart
+      test/price_service_test.dart
+      test/portfolio_summary_test.dart
+5. For existing files, click each file, use the Pencil/Edit button,
+   replace ALL contents with the new matching file, and commit.
+6. Verify both new service files are in lib/services, not in a nested patch folder.
+7. Open Actions > Build Harbor Vault Android APK > Run workflow (main).
+8. Download the APK artifact only if all tests and build turn green.
+
+The existing .github/workflows/build-android-apk.yml can remain as is.
+The build may still be labeled v0.1 (artifact name only) unless you also
+update the full source workflow. Flutter application version will be v0.6.
+
+CAUTION: Existing installed APKs may have a different signature due to
+GitHub's temporary signing environment. DO NOT uninstall the current wallet
+until you have its paper recovery phrase. This APK is for testing ONLY.
+Avoid using real funds or funded wallet recovery phrases.

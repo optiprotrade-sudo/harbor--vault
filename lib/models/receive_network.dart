@@ -4,40 +4,53 @@ enum ReceiveNetwork {
   bitcoin, ethereum, litecoin, usdtErc20, solana,
   tron, usdtTrc20,
   bnbSmartChain, polygon, base, arbitrum, optimism, avalanche,
+  usdcErc20, usdcBase, usdcArbitrum, usdtBep20,
 }
 
 extension ReceiveNetworkInfo on ReceiveNetwork {
   String get label => switch (this) {
     ReceiveNetwork.bitcoin => 'Bitcoin',
-    ReceiveNetwork.ethereum => 'Ethereum',
+    ReceiveNetwork.ethereum => 'Ethereum (ERC-20 network)',
     ReceiveNetwork.litecoin => 'Litecoin',
-    ReceiveNetwork.usdtErc20 => 'USDT (Ethereum ERC-20)',
+    ReceiveNetwork.usdtErc20 => 'USDT (ERC-20)',
     ReceiveNetwork.solana => 'Solana',
-    ReceiveNetwork.tron => 'TRON (TRX)',
-    ReceiveNetwork.usdtTrc20 => 'USDT (TRON TRC-20)',
-    ReceiveNetwork.bnbSmartChain => 'BNB Smart Chain',
-    ReceiveNetwork.polygon => 'Polygon PoS',
-    ReceiveNetwork.base => 'Base',
-    ReceiveNetwork.arbitrum => 'Arbitrum One',
-    ReceiveNetwork.optimism => 'OP Mainnet',
-    ReceiveNetwork.avalanche => 'Avalanche C-Chain',
+    ReceiveNetwork.tron => 'TRX (TRON)',
+    ReceiveNetwork.usdtTrc20 => 'USDT (TRC-20)',
+    ReceiveNetwork.bnbSmartChain => 'BNB (BEP-20 network)',
+    ReceiveNetwork.polygon => 'POL (Polygon)',
+    ReceiveNetwork.base => 'ETH (Base)',
+    ReceiveNetwork.arbitrum => 'ETH (Arbitrum)',
+    ReceiveNetwork.optimism => 'ETH (Optimism)',
+    ReceiveNetwork.avalanche => 'AVAX (Avalanche C-Chain)',
+    ReceiveNetwork.usdcErc20 => 'USDC (ERC-20)',
+    ReceiveNetwork.usdcBase => 'USDC (Base)',
+    ReceiveNetwork.usdcArbitrum => 'USDC (Arbitrum)',
+    ReceiveNetwork.usdtBep20 => 'USDT (BEP-20)',
   };
 
   String get nativeTicker => switch (this) {
     ReceiveNetwork.bitcoin => 'BTC',
-    ReceiveNetwork.ethereum || ReceiveNetwork.base || ReceiveNetwork.arbitrum || ReceiveNetwork.optimism => 'ETH',
+    ReceiveNetwork.ethereum || ReceiveNetwork.usdtErc20 || ReceiveNetwork.usdcErc20 ||
+    ReceiveNetwork.base || ReceiveNetwork.usdcBase || ReceiveNetwork.arbitrum ||
+    ReceiveNetwork.usdcArbitrum || ReceiveNetwork.optimism => 'ETH',
     ReceiveNetwork.litecoin => 'LTC',
-    ReceiveNetwork.usdtErc20 => 'ETH',
     ReceiveNetwork.solana => 'SOL',
     ReceiveNetwork.tron || ReceiveNetwork.usdtTrc20 => 'TRX',
-    ReceiveNetwork.bnbSmartChain => 'BNB',
+    ReceiveNetwork.bnbSmartChain || ReceiveNetwork.usdtBep20 => 'BNB',
     ReceiveNetwork.polygon => 'POL',
     ReceiveNetwork.avalanche => 'AVAX',
   };
 
   String get transferTicker => switch (this) {
-    ReceiveNetwork.usdtErc20 || ReceiveNetwork.usdtTrc20 => 'USDT',
+    ReceiveNetwork.usdtErc20 || ReceiveNetwork.usdtTrc20 || ReceiveNetwork.usdtBep20 => 'USDT',
+    ReceiveNetwork.usdcErc20 || ReceiveNetwork.usdcBase || ReceiveNetwork.usdcArbitrum => 'USDC',
     _ => nativeTicker,
+  };
+
+  bool get isToken => switch (this) {
+    ReceiveNetwork.usdtErc20 || ReceiveNetwork.usdtTrc20 || ReceiveNetwork.usdtBep20 ||
+    ReceiveNetwork.usdcErc20 || ReceiveNetwork.usdcBase || ReceiveNetwork.usdcArbitrum => true,
+    _ => false,
   };
 
   String get derivationPath => switch (this) {
@@ -74,12 +87,14 @@ extension ReceiveNetworkInfo on ReceiveNetwork {
   };
 
   String get caution => switch (this) {
-    ReceiveNetwork.usdtErc20 => 'Ethereum ERC-20 USDT ONLY. Do not select TRON TRC-20 here. ETH is required for future sends.',
-    ReceiveNetwork.usdtTrc20 => 'TRON TRC-20 USDT ONLY. Send only the genuine TRON USDT contract token; NOT ERC-20, BEP-20 or Solana USDT. TRX and Energy/Bandwidth are needed for sending. This prototype CANNOT send.',
-    ReceiveNetwork.tron => 'TRON mainnet address (T…). Only TRON-native assets. Account activation and network resources may apply. Sending is disabled.',
-    ReceiveNetwork.solana => "Solana uses a different key and address. Derived at m/44'/501'/0'/0'. Check restoration compatibility.",
-    ReceiveNetwork.bitcoin => 'Bitcoin mainnet native SegWit (bc1). Not a Lightning invoice or another chain.',
-    ReceiveNetwork.litecoin => 'Litecoin mainnet native SegWit (ltc1). Not a Bitcoin address.',
-    _ => 'EVM address. The same text can appear on multiple EVM chains, but each chain has SEPARATE balances and fees. Confirm the correct network.',
+    ReceiveNetwork.usdtErc20 => 'USDT on Ethereum ERC-20 ONLY. ETH is needed for contract transfer fees.',
+    ReceiveNetwork.usdtTrc20 => 'USDT on TRON TRC-20 ONLY. This uses a T-starting TRON address, NOT the Ethereum address. TRX/Energy/Bandwidth may be needed for transfers.',
+    ReceiveNetwork.usdtBep20 => 'USDT on BNB Smart Chain BEP-20 ONLY. Token contract and balance indexing are not configured; do not fund this experimental address yet.',
+    ReceiveNetwork.usdcErc20 || ReceiveNetwork.usdcBase || ReceiveNetwork.usdcArbitrum => 'USDC is network-specific. Token contract verification and indexing are not implemented here. This is a receive-address preview only.',
+    ReceiveNetwork.tron => 'TRON mainnet address begins with T. Activation and network resources may apply. Sending disabled.',
+    ReceiveNetwork.solana => "SOL wallet address derived at m/44'/501'/0'/0'. SPL tokens additionally require mint/token-account discovery.",
+    ReceiveNetwork.bitcoin => 'Bitcoin mainnet native SegWit (bc1). Only first receiving address; this is not a Lightning invoice.',
+    ReceiveNetwork.litecoin => 'Litecoin mainnet native SegWit (ltc1), not a Bitcoin address.',
+    _ => 'EVM address preview: separate networks may use identical address text but have different balances, token contracts and fees. Network-specific tracking/sending is not implemented for this entry.',
   };
 }

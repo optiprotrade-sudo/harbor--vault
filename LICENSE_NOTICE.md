@@ -7,3 +7,5 @@ licence as AGPL with a lesser clause and may require public availability of
 its own corresponding source or other obligations when distributed.
 
 No trademarks or logos of existing wallet vendors are used.
+
+Third-party package added in v0.7: solana_sdk (MIT, as shown on pub.dev). Review its license and security posture before distribution.

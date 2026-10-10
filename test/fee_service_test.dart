@@ -35,7 +35,33 @@ void main() {
     expect(quote.unit, 'ETH');
     fees.dispose();
   });
-  test('Provider failure is never replaced with a fake zero fee', () async {
+  test('Bitcoin Low / Standard / High are based on provider fields', () async {
+    final fees = FeeService(MockClient((_) async => http.Response(jsonEncode({
+      'economyFee': 3, 'halfHourFee': 5, 'fastestFee': 12,
+    }), 200)));
+    final low = await fees.estimate(ReceiveNetwork.bitcoin, priority: FeePriority.low);
+    final middle = await fees.estimate(ReceiveNetwork.bitcoin);
+    final high = await fees.estimate(ReceiveNetwork.bitcoin, priority: FeePriority.high);
+    expect(low.estimate, '0.0000042 BTC');
+    expect(middle.estimate, '0.000007 BTC');
+    expect(high.estimate, '0.0000168 BTC');
+    fees.dispose();
+  });
+  test('EVM nonstandard fee tiers do not invent quotes', () async {
+    final fees = FeeService();
+    await expectLater(fees.estimate(ReceiveNetwork.usdcBase,
+      priority: FeePriority.low), throwsStateError);
+    fees.dispose();
+  });
+  test('New token fee quotes use token-transfer gas assumptions', () async {
+    final fees = FeeService(MockClient((r) async => http.Response(
+      jsonEncode({'result':'0x3b9aca00'}), 200)));
+    final usdc = await fees.estimate(ReceiveNetwork.usdcBase);
+    expect(usdc.estimate, '0.000065 ETH');
+    expect(usdc.detail, contains('Token transfer'));
+    fees.dispose();
+  });
+  test('Provider failure is never replaced with a fake zero fee' , () async {
     final fees = FeeService(MockClient((_) async => http.Response('rate limit', 429)));
     await expectLater(fees.estimate(ReceiveNetwork.bitcoin), throwsStateError);
     fees.dispose();
