@@ -52,6 +52,7 @@ class WalletEngine {
     final btcPublicKey = root.derivePath("m/84'/0'/0'/0/0").public;
     final ltcPublicKey = root.derivePath("m/84'/2'/0'/0/0").public;
     final ethPrivateKey = root.derivePath("m/44'/60'/0'/0/0").private;
+    final tronPrivateKey = root.derivePath("m/44'/195'/0'/0/0").private;
     if (ethPrivateKey == null || ethPrivateKey.length != 32) {
       throw StateError('Could not derive Ethereum private key.');
     }
@@ -72,12 +73,62 @@ class WalletEngine {
     );
     final solanaAddress = solanaKeypair.publicKey.toString();
 
+    if (tronPrivateKey == null || tronPrivateKey.length != 32) {
+      throw StateError('Could not derive TRON private key.');
+    }
+    final tronKeyHex = tronPrivateKey
+        .map((byte) => byte.toRadixString(16).padLeft(2, '0')).join();
+    // Only the 20-byte account hash is shared with the EVM address
+    // *derived from the same private key*. TRON uses its own BIP44 path.
+    final tronEthHex = EthPrivateKey.fromHex(tronKeyHex).address.eip55With0x;
+    final tronAddress = tronAddressFromEthHex(tronEthHex);
+
     return PublicAddresses(
       bitcoin: _nativeSegwitAddress('bc', btcPublicKey),
       ethereum: ethereumAddress,
       litecoin: _nativeSegwitAddress('ltc', ltcPublicKey),
       solana: solanaAddress,
+      tron: tronAddress,
     );
+  }
+
+  /// Translates the Ethereum-style 20-byte account hash into a TRON Base58Check
+  /// address. This is NOT permission to use the EVM wallet's BIP44 account/path.
+  /// Derive the TRON-specific private key at m/44'/195'/0'/0/0 first.
+  static String tronAddressFromEthHex(String ethHex) {
+    if (!RegExp(r'^0x[0-9a-fA-F]{40}$').hasMatch(ethHex)) {
+      throw const FormatException('Expected an Ethereum-style 20-byte hash.');
+    }
+    final unchecksummed = ethHex.substring(2);
+    final body = Uint8List.fromList([
+      0x41,
+      for (int i = 0; i < unchecksummed.length; i += 2)
+        int.parse(unchecksummed.substring(i, i + 2), radix: 16),
+    ]);
+    final once = crypto.sha256.convert(body).bytes;
+    final checksum = crypto.sha256.convert(once).bytes.take(4);
+    return _base58Encode(Uint8List.fromList([...body, ...checksum]));
+  }
+
+  static String _base58Encode(Uint8List bytes) {
+    const alphabet = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+    var zeroes = 0;
+    for (final b in bytes) {
+      if (b != 0) break;
+      zeroes++;
+    }
+    var value = BigInt.zero;
+    for (final byte in bytes) {
+      value = (value << 8) | BigInt.from(byte);
+    }
+    var encoded = '';
+    final base = BigInt.from(58);
+    while (value > BigInt.zero) {
+      final r = (value % base).toInt();
+      value ~/= base;
+      encoded = alphabet[r] + encoded;
+    }
+    return '${List.filled(zeroes, '1').join()}$encoded';
   }
 
   static String _nativeSegwitAddress(String hrp, Uint8List compressedPublicKey) {

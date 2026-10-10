@@ -57,6 +57,11 @@ class FeeService {
         return FeeQuote(estimate: '${_btc(sat)} LTC',
           detail: 'Live ${satPerKb.toString()} sat/kB × illustrative 200 bytes. Actual UTXOs change transaction size.',
           unit: 'LTC', live: true);
+      case ReceiveNetwork.tron:
+      case ReceiveNetwork.usdtTrc20:
+        // TRC-20 execution can consume Energy/Bandwidth. Cost changes with
+        // available resources and the contract invocation, not a fixed gas fee.
+        throw StateError('TRON fee requires an Energy/Bandwidth simulation; exact estimates not implemented. TRX may be required.');
       case ReceiveNetwork.solana:
         return const FeeQuote(estimate: '0.000005 SOL',
           detail: 'Indicative base fee for one signature (5,000 lamports), NOT live. Does not include priority fees, rent, token accounts or other instructions.',

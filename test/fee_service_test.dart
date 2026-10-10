@@ -40,6 +40,13 @@ void main() {
     await expectLater(fees.estimate(ReceiveNetwork.bitcoin), throwsStateError);
     fees.dispose();
   });
+  test('TRON fee is unavailable rather than pretending TRC-20 gas costs zero', () async {
+    final fees = FeeService();
+    await expectLater(fees.estimate(ReceiveNetwork.usdtTrc20), throwsStateError);
+    await expectLater(fees.estimate(ReceiveNetwork.tron), throwsStateError);
+    fees.dispose();
+  });
+
   test('Solana base fee is explicitly marked illustrative and not live', () async {
     final fees = FeeService();
     final quote = await fees.estimate(ReceiveNetwork.solana);

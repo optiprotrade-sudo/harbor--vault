@@ -9,7 +9,7 @@ import '../models/asset.dart';
 class PriceService {
   static final Uri endpoint = Uri.parse(
     'https://api.coingecko.com/api/v3/simple/price'
-    '?ids=bitcoin,ethereum,litecoin,tether,solana&vs_currencies=usd',
+    '?ids=bitcoin,ethereum,litecoin,tether,solana,tron&vs_currencies=usd',
   );
 
   final http.Client _client;
@@ -33,6 +33,8 @@ class PriceService {
       ChainAsset.ltc: 'litecoin',
       ChainAsset.usdt: 'tether',
       ChainAsset.sol: 'solana',
+      ChainAsset.trx: 'tron',
+      ChainAsset.usdtTrc20: 'tether',
     };
     final prices = <ChainAsset, double>{};
     for (final entry in ids.entries) {

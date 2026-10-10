@@ -49,7 +49,10 @@ class _SendScreenState extends State<SendScreen> {
       setState(() => _quote = quote);
     } catch (_) {
       if (!mounted || request != _requestSequence) return;
-      setState(() => _feeError = 'Fee estimate unavailable from provider. No fee has been assumed.');
+      setState(() => _feeError =
+          (_network == ReceiveNetwork.tron || _network == ReceiveNetwork.usdtTrc20)
+              ? 'TRON fee calculation not implemented: needs Energy/Bandwidth estimation and any applicable TRX burn. No fee has been assumed.'
+              : 'Fee estimate unavailable from provider. No fee has been assumed.');
     } finally {
       if (mounted && request == _requestSequence) setState(() => _loading = false);
     }
@@ -65,6 +68,10 @@ class _SendScreenState extends State<SendScreen> {
         return address.startsWith('ltc1') && address.length >= 14 && address.length <= 90;
       case ReceiveNetwork.solana:
         return RegExp(r'^[1-9A-HJ-NP-Za-km-z]{32,44}$').hasMatch(address);
+      case ReceiveNetwork.tron:
+      case ReceiveNetwork.usdtTrc20:
+        // Format hint only; checksum validation needed before any live sends.
+        return RegExp(r'^T[1-9A-HJ-NP-Za-km-z]{33}$').hasMatch(address);
       default:
         return false;
     }
@@ -96,7 +103,7 @@ class _SendScreenState extends State<SendScreen> {
           const SizedBox(height: 12),
           Text('Indicative fee: ${_quote?.estimate ?? 'Unavailable'}'),
           const SizedBox(height: 12),
-          const Text('BROADCAST DISABLED. No keys are accessed and no transaction is signed. This estimate is NOT the amount that would actually be charged.',
+          const Text('BROADCAST DISABLED. No keys are accessed or used to sign. TRON fees require Energy/Bandwidth and potentially TRX; no fee is invented if unavailable.',
             style: TextStyle(color: Colors.orangeAccent)),
         ],
       )),

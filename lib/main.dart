@@ -238,9 +238,10 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
           if (mounted && _page == _Page.wallet && version == _refreshVersion) {
             setState(() => _balances[asset] = value);
           }
-        } catch (_) {
+        } catch (error) {
           if (mounted && _page == _Page.wallet && version == _refreshVersion) {
-            setState(() => _balanceErrors[asset] = 'Provider unavailable');
+            // Public provider error only. No private information in exceptions.
+            setState(() => _balanceErrors[asset] = error.toString());
           }
         }
       }),
@@ -296,6 +297,8 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
     ChainAsset.ltc => ReceiveNetwork.litecoin,
     ChainAsset.usdt => ReceiveNetwork.usdtErc20,
     ChainAsset.sol => ReceiveNetwork.solana,
+    ChainAsset.trx => ReceiveNetwork.tron,
+    ChainAsset.usdtTrc20 => ReceiveNetwork.usdtTrc20,
   };
 
   void _snack(String message) {
@@ -403,7 +406,7 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
         actions: [
           if (wallet)
             const Padding(padding: EdgeInsets.only(right: 12), child: Center(
-              child: Text('SELF-CUSTODY  •  v0.7', style: TextStyle(fontSize: 10, color: _muted)))),
+              child: Text('SELF-CUSTODY  •  v0.8', style: TextStyle(fontSize: 10, color: _muted)))),
         ],
       ),
       body: wallet
@@ -458,7 +461,7 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
       const SizedBox(height: 28),
       const Text('Your coins.\nYour keys.', style: TextStyle(fontWeight: FontWeight.w900, fontSize: 48, height: 1.05)),
       const SizedBox(height: 18),
-      const Text('A private home for Bitcoin, Ethereum, Litecoin, Solana and Ethereum-network USDT. No server account. No custodial access.', style: TextStyle(color: _muted, fontSize: 16, height: 1.6)),
+      const Text('A private home for Bitcoin, Ethereum, Litecoin, Solana, TRON and USDT on ERC-20 or TRC-20. No custodial access.', style: TextStyle(color: _muted, fontSize: 16, height: 1.6)),
       const SizedBox(height: 32),
       const _InfoBanner(icon: Icons.warning_amber_outlined, text: 'PROTOTYPE · Receive-only. Do not deposit real funds until builds, derivation and storage have been independently audited.'),
       const SizedBox(height: 24),
@@ -480,7 +483,7 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
           keyboardType: TextInputType.multiline,
           decoration: const InputDecoration(labelText: 'Recovery phrase', alignLabelWithHint: true)),
       const SizedBox(height: 14),
-      const _InfoBanner(icon: Icons.info_outline, text: 'This prototype checks only first receiving address (index 0) for each standard path. Older coins in other accounts/addresses may not appear.'),
+      const _InfoBanner(icon: Icons.info_outline, text: 'This prototype checks only first receiving address (index 0) for each path. Assets held on older addresses/accounts or other EVM networks may not appear.'),
       const SizedBox(height: 22),
       ElevatedButton(onPressed: _saving ? null : _restore, child: Text(_saving ? 'Saving…' : 'Restore on this device')),
     ]);
@@ -532,7 +535,7 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
     final coverage = estimate.usd == null
         ? _priceError ?? 'Waiting for balance and USD price checks'
         : estimate.complete
-            ? 'Estimate for all 5 tracked first addresses'
+            ? 'Estimate for all tracked first addresses'
             : 'Partial estimate · ${estimate.counted} of ${estimate.total} assets priced';
 
     return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -624,7 +627,7 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
       }),
       const SizedBox(height: 18),
       const _InfoBanner(icon: Icons.warning_amber_outlined,
-        text: 'Review-only sending. USD total covers five tracked first addresses only, not every EVM chain or token. Never deposit real funds until signing and recovery are audited.'),
+        text: 'Review-only sending. USD total includes only the supported first-address balance checks (BTC, ETH, LTC, SOL, TRX and USDT by ERC-20/TRC-20). Provider failures make the estimate partial. Do NOT deposit funds before security review.'),
     ]);
   }
 
@@ -644,7 +647,7 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
         ? PortfolioSummary.formatUsd(usdValue)
         : '••••';
     final subtitle = error != null
-        ? 'Balance unavailable'
+        ? 'Balance unavailable · tap for details'
         : _refreshing && balance == null
             ? 'Checking…'
             : balance == null ? 'Not checked' : 'Confirmed · ${asset.network}';
@@ -694,6 +697,11 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
           Padding(padding: const EdgeInsets.fromLTRB(14, 13, 14, 15),
             child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
               Text(asset.network, style: const TextStyle(color: _muted, fontSize: 11)),
+              if (error != null) ...[
+                const SizedBox(height: 7),
+                SelectableText(error, style: const TextStyle(
+                  color: Colors.orangeAccent, fontSize: 11)),
+              ],
               const SizedBox(height: 8),
               SelectableText(_addresses!.of(asset),
                 style: const TextStyle(fontSize: 12, color: Color(0xFFCCDFDF))),
@@ -759,10 +767,10 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
       _InfoBanner(icon: Icons.warning_amber_outlined, text: network.caution),
       const SizedBox(height: 12),
       if (network.trackedAsset == null)
-        const Text('Preview address only · balance and token indexing for this network are not implemented in v0.7.',
+        const Text('Preview address only · balance and token indexing for this network are not implemented.',
           style: TextStyle(color: Colors.orangeAccent, fontSize: 12)),
       const SizedBox(height: 12),
-      const Text('Not all chains are EVM. TRON, XRP, Bitcoin Lightning, SPL token accounts, and every token on these networks require separate implementation and testing.',
+      const Text('Not all chains are EVM. XRP, Bitcoin Lightning, SPL token accounts, and unlisted tokens need separate implementation. TRC-20 is TRON-specific and MUST NOT use an ERC-20 address.',
         style: TextStyle(color: _muted, fontSize: 12)),
     ]);
   }
@@ -795,7 +803,7 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
       const SizedBox(height: 20),
       const Text('Standard derivation paths', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
       const SizedBox(height: 10),
-      ...ChainAsset.values.where((a) => a != ChainAsset.usdt).map((a) =>
+      ...ChainAsset.values.where((a) => a != ChainAsset.usdt && a != ChainAsset.usdtTrc20).map((a) =>
         Padding(padding: const EdgeInsets.symmetric(vertical: 5), child: Row(children: [
           SizedBox(width: 80, child: Text(a.symbol, style: const TextStyle(color: _mint))),
           SelectableText(a.path, style: const TextStyle(color: _muted)),
@@ -805,7 +813,7 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
         label: const Text('Delete wallet from this device', style: TextStyle(color: Colors.redAccent)),
         style: OutlinedButton.styleFrom(minimumSize: const Size.fromHeight(50))),
       const SizedBox(height: 20),
-      const Text('v0.7 receive addresses + review-only send · Not audited · No warranty. Keep an offline recovery backup.', style: TextStyle(color: _muted, fontSize: 11)),
+      const Text('v0.8 receive addresses + review-only send · Not audited · No warranty. Keep an offline recovery backup.', style: TextStyle(color: _muted, fontSize: 11)),
     ]);
   }
 
