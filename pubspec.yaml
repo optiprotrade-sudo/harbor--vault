@@ -1,7 +1,7 @@
 name: harbor_vault
 description: Personal, self-custodial, multi-chain wallet prototype with safe send review.
 publish_to: none
-version: 0.8.0+8
+version: 0.9.0+9
 
 environment:
   sdk: '>=3.4.0 <4.0.0'

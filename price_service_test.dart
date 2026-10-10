@@ -11,12 +11,14 @@ void main() {
     final service = PriceService(MockClient((request) async {
       expect(request.url.host, 'api.coingecko.com');
       expect(request.url.queryParameters['vs_currencies'], 'usd');
-      expect(request.url.queryParameters['ids'], 'bitcoin,ethereum,litecoin,tether');
+      expect(request.url.queryParameters['ids'], 'bitcoin,ethereum,litecoin,tether,solana,tron');
       return http.Response(jsonEncode({
         'bitcoin': {'usd': 72000},
         'ethereum': {'usd': 3000.5},
         'litecoin': {'usd': 110},
         'tether': {'usd': 0.998},
+        'solana': {'usd': 152.5},
+        'tron': {'usd': .33},
       }), 200);
     }));
     final quotes = await service.fetchUsd();
@@ -24,6 +26,9 @@ void main() {
     expect(quotes[ChainAsset.eth], 3000.5);
     expect(quotes[ChainAsset.ltc], 110);
     expect(quotes[ChainAsset.usdt], .998);
+    expect(quotes[ChainAsset.sol], 152.5);
+    expect(quotes[ChainAsset.trx], .33);
+    expect(quotes[ChainAsset.usdtTrc20], .998);
     service.dispose();
   });
 

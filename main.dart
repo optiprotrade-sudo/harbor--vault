@@ -1,0 +1,900 @@
+import 'dart:async';
+
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:qr_flutter/qr_flutter.dart';
+import 'models/asset.dart';
+import 'models/receive_network.dart';
+import 'models/wallet_listing.dart';
+import 'screens/send_screen.dart';
+import 'services/balance_service.dart';
+import 'services/price_service.dart';
+import 'services/portfolio_summary.dart';
+import 'services/vault_storage.dart';
+import 'services/wallet_engine.dart';
+
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  runApp(const HarborVaultApp());
+}
+
+const _bg = Color(0xFF071319);
+const _panel = Color(0xFF10242B);
+const _mint = Color(0xFF8DF0CB);
+const _muted = Color(0xFFA0B9BF);
+
+enum _Page { loading, welcome, backup, restore, wallet, error }
+
+class HarborVaultApp extends StatelessWidget {
+  const HarborVaultApp({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      title: 'Harbor Vault',
+      debugShowCheckedModeBanner: false,
+      theme: ThemeData(
+        useMaterial3: true,
+        brightness: Brightness.dark,
+        scaffoldBackgroundColor: _bg,
+        colorScheme: ColorScheme.fromSeed(seedColor: _mint, brightness: Brightness.dark,
+            surface: _panel, primary: _mint),
+        appBarTheme: const AppBarTheme(backgroundColor: _bg, elevation: 0),
+        cardTheme: CardThemeData(color: _panel, elevation: 0,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20))),
+        inputDecorationTheme: InputDecorationTheme(
+          filled: true, fillColor: const Color(0xFF153039),
+          contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
+          border: OutlineInputBorder(borderRadius: BorderRadius.circular(14), borderSide: BorderSide.none),
+        ),
+        elevatedButtonTheme: ElevatedButtonThemeData(
+          style: ElevatedButton.styleFrom(
+            backgroundColor: _mint, foregroundColor: _bg,
+            minimumSize: const Size.fromHeight(52),
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+            textStyle: const TextStyle(fontWeight: FontWeight.w800),
+          ),
+        ),
+      ),
+      home: const VaultScreen(),
+    );
+  }
+}
+
+class VaultScreen extends StatefulWidget {
+  const VaultScreen({super.key});
+  @override
+  State<VaultScreen> createState() => _VaultScreenState();
+}
+
+class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
+  final _storage = VaultStorage();
+  final _balanceService = BalanceService();
+  final _priceService = PriceService();
+  final _word3 = TextEditingController();
+  final _word9 = TextEditingController();
+  final _importText = TextEditingController();
+  final _assetSearch = TextEditingController();
+  String _assetFilter = 'All';
+  _Page _page = _Page.loading;
+  PublicAddresses? _addresses;
+  String? _pendingMnemonic;
+  String? _error;
+  bool _saving = false;
+  bool _refreshing = false;
+  bool _foreground = true;
+  bool _balancesVisible = true;
+  DateTime? _lastChecked;
+  String? _priceError;
+  Timer? _autoRefreshTimer;
+  final Set<ReceiveNetwork> _expandedNetworks = {};
+  final Map<ChainAsset, double> _usdPrices = {};
+  int _refreshVersion = 0;
+  int _tab = 0;
+  ChainAsset _selected = ChainAsset.btc;
+  ReceiveNetwork _receiveNetwork = ReceiveNetwork.bitcoin;
+  ReceiveNetwork _sendNetwork = ReceiveNetwork.bitcoin;
+  final Map<ChainAsset, String> _balances = {};
+  final Map<ChainAsset, String> _balanceErrors = {};
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _autoRefreshTimer = Timer.periodic(const Duration(minutes: 5), (_) {
+      if (mounted && _foreground && _page == _Page.wallet) _refresh();
+    });
+    _boot();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    final wasForeground = _foreground;
+    _foreground = state == AppLifecycleState.resumed;
+    if (!wasForeground && _foreground && _page == _Page.wallet) _refresh();
+  }
+
+  void _scheduleFirstCheck() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && _page == _Page.wallet) _refresh();
+    });
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _autoRefreshTimer?.cancel();
+    _word3.dispose();
+    _word9.dispose();
+    _importText.dispose();
+    _assetSearch.dispose();
+    _balanceService.dispose();
+    _priceService.dispose();
+    super.dispose();
+  }
+
+  Future<void> _boot() async {
+    try {
+      final phrase = await _storage.getPhrase();
+      if (!mounted) return;
+      if (phrase == null) {
+        setState(() => _page = _Page.welcome);
+      } else {
+        final derived = WalletEngine.derive(phrase);
+        if (mounted) setState(() {
+          _addresses = derived;
+          _page = _Page.wallet;
+        });
+        _scheduleFirstCheck();
+      }
+    } catch (e) {
+      if (mounted) setState(() {
+        _error = 'Unable to open the encrypted wallet. Details: $e';
+        _page = _Page.error;
+      });
+    }
+  }
+
+  void _create() {
+    try {
+      final phrase = WalletEngine.createMnemonic();
+      // Derive before accepting or persisting the phrase.
+      WalletEngine.derive(phrase);
+      _word3.clear();
+      _word9.clear();
+      setState(() {
+        _pendingMnemonic = phrase;
+        _page = _Page.backup;
+      });
+    } catch (e) {
+      _snack('Could not securely create the recovery words: $e');
+    }
+  }
+
+  Future<void> _completeCreation() async {
+    final phrase = _pendingMnemonic;
+    if (phrase == null) return;
+    final words = phrase.split(' ');
+    if (_word3.text.toLowerCase().trim() != words[2] ||
+        _word9.text.toLowerCase().trim() != words[8]) {
+      _snack('Word 3 or word 9 did not match. Check your written backup.');
+      return;
+    }
+    await _storeAndOpen(phrase);
+  }
+
+  Future<void> _restore() async {
+    final phrase = WalletEngine.normalize(_importText.text);
+    if (!WalletEngine.validMnemonic(phrase)) {
+      _snack('Invalid BIP39 English recovery phrase or checksum.');
+      return;
+    }
+    await _storeAndOpen(phrase);
+    _importText.clear();
+  }
+
+  Future<void> _storeAndOpen(String phrase) async {
+    if (_saving) return;
+    setState(() => _saving = true);
+    try {
+      final derived = WalletEngine.derive(phrase);
+      await _storage.storePhrase(phrase);
+      if (!mounted) return;
+      setState(() {
+        _addresses = derived;
+        _page = _Page.wallet;
+        _pendingMnemonic = null;
+        _balances.clear();
+        _balanceErrors.clear();
+        _usdPrices.clear();
+        _lastChecked = null;
+        _priceError = null;
+        _refreshVersion++;
+        _refreshing = false;
+        _expandedNetworks.clear();
+      });
+      _scheduleFirstCheck();
+      _snack('Wallet saved in device encrypted storage.');
+    } catch (e) {
+      if (mounted) _snack('Could not save the wallet: $e');
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  Future<void> _refresh() async {
+    if (_refreshing || _addresses == null || _page != _Page.wallet) return;
+    final addresses = _addresses!;
+    final version = ++_refreshVersion;
+    setState(() {
+      _refreshing = true;
+      _balanceErrors.clear();
+      _balances.clear(); // Never pass cached values off as fresh.
+      _usdPrices.clear();
+      _priceError = null;
+    });
+
+    // Only public receiving addresses go to block explorers. The pricing
+    // endpoint receives no wallet address, seed phrase or private key.
+    final requests = <Future<void>>[
+      ...ChainAsset.values.map((asset) async {
+        try {
+          final value = await _balanceService.fetch(asset, addresses.of(asset));
+          if (mounted && _page == _Page.wallet && version == _refreshVersion) {
+            setState(() => _balances[asset] = value);
+          }
+        } catch (error) {
+          if (mounted && _page == _Page.wallet && version == _refreshVersion) {
+            // Public provider error only. No private information in exceptions.
+            setState(() => _balanceErrors[asset] = error.toString());
+          }
+        }
+      }),
+      _loadPrices(version),
+    ];
+    await Future.wait(requests);
+    if (mounted && _page == _Page.wallet && version == _refreshVersion) {
+      setState(() {
+        _lastChecked = DateTime.now();
+        _refreshing = false;
+      });
+    }
+  }
+
+  Future<void> _loadPrices(int version) async {
+    try {
+      final prices = await _priceService.fetchUsd();
+      if (mounted && _page == _Page.wallet && version == _refreshVersion) {
+        setState(() => _usdPrices.addAll(prices));
+      }
+    } catch (_) {
+      if (mounted && _page == _Page.wallet && version == _refreshVersion) {
+        setState(() => _priceError = 'USD pricing unavailable');
+      }
+    }
+  }
+
+  String _checkedLabel() {
+    if (_refreshing) return 'Checking public networks and USD quotes…';
+    final last = _lastChecked;
+    if (last == null) return 'Not checked yet';
+    final localTime = '${last.hour.toString().padLeft(2, '0')}:${last.minute.toString().padLeft(2, '0')}';
+    return 'Last checked $localTime · Refreshes every 5 min while open';
+  }
+
+  Future<void> _copyAddress(ChainAsset asset) async {
+    final address = _addresses?.of(asset);
+    if (address == null) return;
+    await Clipboard.setData(ClipboardData(text: address));
+    _snack('${asset.symbol} public address copied. Verify the network before depositing.');
+  }
+
+  Future<void> _copyNetworkAddress(ReceiveNetwork network) async {
+    final addresses = _addresses;
+    if (addresses == null) return;
+    await Clipboard.setData(ClipboardData(text: network.addressOf(addresses)));
+    _snack('Address copied for ${network.label}. Double-check the exact sending network.');
+  }
+
+  ReceiveNetwork _networkForAsset(ChainAsset asset) => switch (asset) {
+    ChainAsset.btc => ReceiveNetwork.bitcoin,
+    ChainAsset.eth => ReceiveNetwork.ethereum,
+    ChainAsset.ltc => ReceiveNetwork.litecoin,
+    ChainAsset.usdt => ReceiveNetwork.usdtErc20,
+    ChainAsset.sol => ReceiveNetwork.solana,
+    ChainAsset.trx => ReceiveNetwork.tron,
+    ChainAsset.usdtTrc20 => ReceiveNetwork.usdtTrc20,
+  };
+
+  void _snack(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(content: Text(message), duration: const Duration(seconds: 4)));
+  }
+
+  Future<void> _showRecoveryPhrase() async {
+    final confirmation = TextEditingController();
+    final accepted = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Show recovery words?'),
+        content: Column(mainAxisSize: MainAxisSize.min, children: [
+          const Text('Anyone who sees these words can take all funds. Close screen recording and make sure nobody is watching. This version does NOT enforce app authentication.'),
+          const SizedBox(height: 12),
+          TextField(controller: confirmation, decoration: const InputDecoration(labelText: 'Type SHOW to continue')),
+        ]),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
+          TextButton(onPressed: () => Navigator.pop(ctx, confirmation.text.trim() == 'SHOW'), child: const Text('Reveal')),
+        ],
+      ),
+    );
+    confirmation.dispose();
+    if (accepted != true || !mounted) return;
+    try {
+      final phrase = await _storage.getPhrase();
+      if (!mounted || phrase == null) return;
+      await showDialog<void>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('Secret recovery phrase'),
+          content: SizedBox(width: 420, child: Column(mainAxisSize: MainAxisSize.min, children: [
+            const Text('Write these down offline. Never send them to anyone or store screenshots.', style: TextStyle(color: Colors.orangeAccent)),
+            const SizedBox(height: 14),
+            _PhraseGrid(phrase: phrase),
+          ])),
+          actions: [TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Close'))],
+        ),
+      );
+    } catch (e) {
+      _snack('Could not unlock recovery words: $e');
+    }
+  }
+
+  Future<void> _deleteWallet() async {
+    final controller = TextEditingController();
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Delete this local wallet?'),
+        content: Column(mainAxisSize: MainAxisSize.min, children: [
+          const Text('This removes the encrypted recovery phrase from this device. If you do not have a backup, access to coins may be lost permanently.'),
+          const SizedBox(height: 16),
+          TextField(controller: controller, decoration: const InputDecoration(labelText: 'Type DELETE to confirm')),
+        ]),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
+          TextButton(onPressed: () => Navigator.pop(ctx, controller.text == 'DELETE'), child: const Text('Delete', style: TextStyle(color: Colors.redAccent))),
+        ],
+      ),
+    );
+    controller.dispose();
+    if (confirmed != true || !mounted) return;
+    try {
+      await _storage.remove();
+      if (!mounted) return;
+      setState(() {
+        _addresses = null;
+        _balances.clear();
+        _balanceErrors.clear();
+        _usdPrices.clear();
+        _lastChecked = null;
+        _priceError = null;
+        _refreshVersion++;
+        _refreshing = false;
+        _expandedNetworks.clear();
+        _page = _Page.welcome;
+        _tab = 0;
+        _selected = ChainAsset.btc;
+      });
+      _snack('Local wallet removed. Your offline recovery backup is still essential.');
+    } catch (e) {
+      _snack('Wallet could not be deleted: $e');
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final desktop = MediaQuery.sizeOf(context).width >= 800;
+    final wallet = _page == _Page.wallet;
+    return Scaffold(
+      appBar: AppBar(
+        title: Row(mainAxisSize: MainAxisSize.min, children: [
+          Container(width: 32, height: 32, alignment: Alignment.center,
+            decoration: BoxDecoration(color: _mint, borderRadius: BorderRadius.circular(10)),
+            child: const Icon(Icons.anchor_rounded, color: _bg, size: 21)),
+          const SizedBox(width: 10),
+          const Text('HARBOR', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900, letterSpacing: 2)),
+          const Text(' VAULT', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w300, letterSpacing: 1)),
+        ]),
+        actions: [
+          if (wallet)
+            const Padding(padding: EdgeInsets.only(right: 12), child: Center(
+              child: Text('SELF-CUSTODY  •  v0.9', style: TextStyle(fontSize: 10, color: _muted)))),
+        ],
+      ),
+      body: wallet
+        ? Row(children: [
+            if (desktop) NavigationRail(
+              backgroundColor: _bg,
+              selectedIndex: _tab,
+              onDestinationSelected: (value) => setState(() => _tab = value),
+              labelType: NavigationRailLabelType.all,
+              destinations: const [
+                NavigationRailDestination(icon: Icon(Icons.account_balance_wallet_outlined), selectedIcon: Icon(Icons.account_balance_wallet), label: Text('Assets')),
+                NavigationRailDestination(icon: Icon(Icons.qr_code), label: Text('Receive')),
+                NavigationRailDestination(icon: Icon(Icons.send_outlined), label: Text('Send')),
+                NavigationRailDestination(icon: Icon(Icons.shield_outlined), label: Text('Security')),
+              ],
+            ),
+            Expanded(child: _walletContent()),
+          ])
+        : SafeArea(child: Center(child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 610),
+            child: SingleChildScrollView(padding: const EdgeInsets.all(24), child: _onboarding()),
+          ))),
+      bottomNavigationBar: wallet && !desktop
+        ? NavigationBar(
+            backgroundColor: const Color(0xFF0E222A),
+            selectedIndex: _tab,
+            onDestinationSelected: (value) => setState(() => _tab = value),
+            destinations: const [
+              NavigationDestination(icon: Icon(Icons.account_balance_wallet_outlined), selectedIcon: Icon(Icons.account_balance_wallet), label: 'Assets'),
+              NavigationDestination(icon: Icon(Icons.qr_code), label: 'Receive'),
+              NavigationDestination(icon: Icon(Icons.send_outlined), label: 'Send'),
+              NavigationDestination(icon: Icon(Icons.shield_outlined), label: 'Security'),
+            ],
+          ) : null,
+    );
+  }
+
+  Widget _onboarding() {
+    if (_page == _Page.loading) return const Center(child: CircularProgressIndicator());
+    if (_page == _Page.error) return Column(mainAxisSize: MainAxisSize.min, children: [
+      const Icon(Icons.error_outline, color: Colors.orangeAccent, size: 54),
+      const SizedBox(height: 18),
+      const Text('Encrypted wallet could not be loaded', style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
+      const SizedBox(height: 12),
+      Text(_error ?? 'Unknown error', textAlign: TextAlign.center),
+      const SizedBox(height: 16),
+      OutlinedButton(onPressed: _boot, child: const Text('Retry')),
+    ]);
+    if (_page == _Page.welcome) return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      const SizedBox(height: 28),
+      _pill('PERSONAL  •  NO ACCOUNT  •  NO NAIRA'),
+      const SizedBox(height: 28),
+      const Text('Your coins.\nYour keys.', style: TextStyle(fontWeight: FontWeight.w900, fontSize: 48, height: 1.05)),
+      const SizedBox(height: 18),
+      const Text('A private home for Bitcoin, Ethereum, Litecoin, Solana, TRON and USDT on ERC-20 or TRC-20. No custodial access.', style: TextStyle(color: _muted, fontSize: 16, height: 1.6)),
+      const SizedBox(height: 32),
+      const _InfoBanner(icon: Icons.warning_amber_outlined, text: 'PROTOTYPE · Receive-only. Do not deposit real funds until builds, derivation and storage have been independently audited.'),
+      const SizedBox(height: 24),
+      ElevatedButton.icon(onPressed: _create, icon: const Icon(Icons.add_circle_outline), label: const Text('Create a new wallet')),
+      const SizedBox(height: 12),
+      OutlinedButton.icon(onPressed: () => setState(() => _page = _Page.restore), icon: const Icon(Icons.restore), label: const Text('Restore with recovery words'), style: OutlinedButton.styleFrom(minimumSize: const Size.fromHeight(52))),
+      const SizedBox(height: 25),
+      const Text('While the wallet is open, public receiving addresses are checked on launch and about every five minutes. USD prices come from a separate public provider. Recovery words are never sent.', style: TextStyle(color: _muted, fontSize: 12)),
+    ]);
+    if (_page == _Page.restore) return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      TextButton.icon(onPressed: () => setState(() => _page = _Page.welcome), icon: const Icon(Icons.arrow_back), label: const Text('Back')),
+      const SizedBox(height: 16),
+      const Text('Restore wallet', style: TextStyle(fontSize: 32, fontWeight: FontWeight.bold)),
+      const SizedBox(height: 10),
+      const Text('Enter a valid English BIP39 recovery phrase. Never send your recovery words to a website or support agent.', style: TextStyle(color: _muted)),
+      const SizedBox(height: 22),
+      TextField(controller: _importText, minLines: 4, maxLines: 6,
+          enableSuggestions: false, autocorrect: false,
+          keyboardType: TextInputType.multiline,
+          decoration: const InputDecoration(labelText: 'Recovery phrase', alignLabelWithHint: true)),
+      const SizedBox(height: 14),
+      const _InfoBanner(icon: Icons.info_outline, text: 'This prototype checks only first receiving address (index 0) for each path. Assets held on older addresses/accounts or other EVM networks may not appear.'),
+      const SizedBox(height: 22),
+      ElevatedButton(onPressed: _saving ? null : _restore, child: Text(_saving ? 'Saving…' : 'Restore on this device')),
+    ]);
+    if (_page == _Page.backup) {
+      final phrase = _pendingMnemonic;
+      if (phrase == null) return const SizedBox.shrink();
+      return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        TextButton.icon(onPressed: () => setState(() { _pendingMnemonic = null; _page = _Page.welcome; }), icon: const Icon(Icons.arrow_back), label: const Text('Cancel creation')),
+        const SizedBox(height: 12),
+        const Text('Secure your recovery words', style: TextStyle(fontSize: 30, fontWeight: FontWeight.w800)),
+        const SizedBox(height: 14),
+        const _InfoBanner(icon: Icons.lock_outline, text: 'Write these 12 words on paper, in order. Do NOT take screenshots, copy them into chat, or save them in cloud notes.'),
+        const SizedBox(height: 20),
+        _PhraseGrid(phrase: phrase),
+        const SizedBox(height: 22),
+        const Text('Confirm your handwritten backup', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 17)),
+        const SizedBox(height: 12),
+        Row(children: [
+          Expanded(child: TextField(controller: _word3, autocorrect: false, enableSuggestions: false, decoration: const InputDecoration(labelText: 'Word #3'))),
+          const SizedBox(width: 12),
+          Expanded(child: TextField(controller: _word9, autocorrect: false, enableSuggestions: false, decoration: const InputDecoration(labelText: 'Word #9'))),
+        ]),
+        const SizedBox(height: 20),
+        ElevatedButton(onPressed: _saving ? null : _completeCreation, child: Text(_saving ? 'Saving…' : 'I saved my words — create wallet')),
+      ]);
+    }
+    return const SizedBox.shrink();
+  }
+
+  Widget _walletContent() {
+    return Center(child: ConstrainedBox(
+      constraints: const BoxConstraints(maxWidth: 1120),
+      child: SingleChildScrollView(padding: const EdgeInsets.fromLTRB(20, 22, 20, 38),
+        child: switch (_tab) {
+          0 => _assetsView(),
+          1 => _receiveView(),
+          2 => SendScreen(addresses: _addresses!, initialNetwork: _sendNetwork, balances: _balances, usdPrices: _usdPrices),
+          _ => _securityView(),
+        }),
+    ));
+  }
+
+  Widget _assetsView() {
+    final estimate = PortfolioSummary.calculate(_balances, _usdPrices);
+    final shownUsd = _balancesVisible
+        ? PortfolioSummary.formatUsd(estimate.usd)
+        : '••••••';
+    final coverage = estimate.usd == null
+        ? _priceError ?? 'Waiting for balance and USD price checks'
+        : estimate.complete
+            ? 'Estimate for all tracked first addresses'
+            : 'Partial estimate · ${estimate.counted} of ${estimate.total} assets priced';
+
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+        const Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text('My wallet', style: TextStyle(fontSize: 26, fontWeight: FontWeight.w900)),
+          SizedBox(height: 4),
+          Text('Mainnet · First receiving address only',
+            style: TextStyle(color: _muted, fontSize: 11)),
+        ]),
+        const Icon(Icons.account_balance_wallet_outlined, color: _mint),
+      ]),
+      const SizedBox(height: 17),
+      Container(
+        width: double.infinity,
+        padding: const EdgeInsets.fromLTRB(20, 20, 20, 18),
+        decoration: BoxDecoration(
+          gradient: const LinearGradient(
+            begin: Alignment.topLeft, end: Alignment.bottomRight,
+            colors: [Color(0xFF1B4342), Color(0xFF102A35)]),
+          borderRadius: BorderRadius.circular(23),
+          border: Border.all(color: const Color(0xFF2B5350)),
+        ),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Row(children: [
+            const Expanded(child: Text('TOTAL WALLET BALANCE',
+              style: TextStyle(color: _mint, fontSize: 12,
+                fontWeight: FontWeight.w800, letterSpacing: 1.1))),
+            IconButton(
+              tooltip: _balancesVisible ? 'Hide balances' : 'Show balances',
+              visualDensity: VisualDensity.compact,
+              onPressed: () => setState(() => _balancesVisible = !_balancesVisible),
+              icon: Icon(_balancesVisible ? Icons.visibility_outlined : Icons.visibility_off_outlined,
+                color: _mint, size: 20),
+            ),
+            IconButton(onPressed: _refreshing ? null : _refresh,
+              tooltip: 'Refresh balances and USD prices',
+              icon: const Icon(Icons.sync, color: _mint, size: 20)),
+          ]),
+          const SizedBox(height: 4),
+          FittedBox(fit: BoxFit.scaleDown, alignment: Alignment.centerLeft,
+            child: Text(shownUsd, style: const TextStyle(fontSize: 35,
+              fontWeight: FontWeight.w900, letterSpacing: -.8))),
+          const SizedBox(height: 5),
+          Text(coverage, style: TextStyle(
+            color: estimate.complete ? _muted : const Color(0xFFFFDB8C), fontSize: 12)),
+          const SizedBox(height: 7),
+          Text(_checkedLabel(), style: const TextStyle(color: _muted, fontSize: 11)),
+          const SizedBox(height: 16),
+          Row(children: [
+            Expanded(child: OutlinedButton.icon(
+              onPressed: () => setState(() => _tab = 2),
+              icon: const Icon(Icons.send_outlined, size: 18),
+              label: const Text('Send'),
+              style: OutlinedButton.styleFrom(
+                minimumSize: const Size.fromHeight(45),
+                foregroundColor: _mint,
+                side: const BorderSide(color: Color(0xFF5C8179))),
+            )),
+            const SizedBox(width: 10),
+            Expanded(child: ElevatedButton.icon(
+              onPressed: () => setState(() => _tab = 1),
+              icon: const Icon(Icons.qr_code, size: 18),
+              label: const Text('Receive'),
+              style: ElevatedButton.styleFrom(minimumSize: const Size.fromHeight(45)),
+            )),
+          ]),
+        ]),
+      ),
+      const SizedBox(height: 22),
+      Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+        const Text('Your assets', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800)),
+        Text('${WalletListing.all.length} networks & tokens',
+          style: const TextStyle(fontSize: 12, color: _muted)),
+      ]),
+      const SizedBox(height: 10),
+      Row(children: [
+        Expanded(child: TextField(controller: _assetSearch,
+          onChanged: (_) => setState(() {}),
+          decoration: const InputDecoration(
+            hintText: 'Search BTC, USDT, TRC-20, Base…',
+            prefixIcon: Icon(Icons.search)))),
+        const SizedBox(width: 8),
+        PopupMenuButton<String>(
+          tooltip: 'Filter coins',
+          initialValue: _assetFilter,
+          onSelected: (value) => setState(() => _assetFilter = value),
+          itemBuilder: (_) => const [
+            PopupMenuItem(value: 'All', child: Text('All assets')),
+            PopupMenuItem(value: 'Native', child: Text('Native coins')),
+            PopupMenuItem(value: 'Stablecoins', child: Text('Stablecoins')),
+          ],
+          child: Container(padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 18),
+            decoration: BoxDecoration(color: _panel,
+              borderRadius: BorderRadius.circular(14)),
+            child: Row(children: [
+              Text(_assetFilter, style: const TextStyle(fontSize: 12)),
+              const Icon(Icons.keyboard_arrow_down, size: 17),
+            ])),
+        ),
+      ]),
+      const SizedBox(height: 13),
+      LayoutBuilder(builder: (context, constraints) {
+        const gap = 9.0;
+        final columns = constraints.maxWidth > 680 ? 2 : 1;
+        final cardWidth = (constraints.maxWidth - (columns - 1) * gap) / columns;
+        final visible = WalletListing.search(_assetSearch.text, filter: _assetFilter);
+        return Wrap(spacing: gap, runSpacing: gap, children: [
+          for (final listing in visible)
+            SizedBox(width: cardWidth, child: _listingCard(listing)),
+          if (visible.isEmpty)
+            const Padding(padding: EdgeInsets.all(24),
+              child: Text('No matching assets. Try another coin or network.',
+                style: TextStyle(color: _muted))),
+        ]);
+      }),
+      const SizedBox(height: 12),
+      const Text('TON, SFP, MAG7.ssi and arbitrary tokens need verified contracts or separate chain integration. They are not silently added as spendable assets.',
+        style: TextStyle(color: _muted, fontSize: 11)),
+      const SizedBox(height: 18),
+      const _InfoBanner(icon: Icons.warning_amber_outlined,
+        text: 'Review-only sending. USD total includes only the supported first-address balance checks (BTC, ETH, LTC, SOL, TRX and USDT by ERC-20/TRC-20). Provider failures make the estimate partial. Do NOT deposit funds before security review.'),
+    ]);
+  }
+
+  Widget _listingCard(WalletListing listing) {
+    final asset = listing.trackedAsset;
+    final balance = asset == null ? null : _balances[asset];
+    final error = asset == null ? null : _balanceErrors[asset];
+    final quote = asset == null ? null : _usdPrices[asset];
+    final numeric = double.tryParse(balance ?? '');
+    final validPrice = numeric != null && numeric.isFinite && numeric >= 0 &&
+        quote != null && quote.isFinite && quote > 0;
+    final usdValue = validPrice ? numeric! * quote! : null;
+    final expanded = _expandedNetworks.contains(listing.network);
+    final quantity = !_balancesVisible ? '•••• ${listing.ticker}'
+      : balance == null ? '— ${listing.ticker}' : '$balance ${listing.ticker}';
+    final usdLabel = !_balancesVisible ? '••••' : PortfolioSummary.formatUsd(usdValue);
+    final subtitle = asset == null ? 'Address only · balance not indexed'
+      : error != null ? 'Balance unavailable · tap for details'
+      : _refreshing && balance == null ? 'Checking…'
+      : balance == null ? 'Not checked' : 'Balance checked';
+    return Card(margin: EdgeInsets.zero,
+      clipBehavior: Clip.antiAlias,
+      child: Column(children: [
+        InkWell(
+          onTap: () => setState(() {
+            if (expanded) { _expandedNetworks.remove(listing.network); }
+            else { _expandedNetworks.add(listing.network); }
+          }),
+          child: Padding(padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 16),
+            child: Row(children: [
+              CircleAvatar(radius: 23, backgroundColor: listing.color.withValues(alpha: .14),
+                child: Text(listing.ticker.substring(0, 1),
+                  style: TextStyle(color: listing.color, fontSize: 18,
+                    fontWeight: FontWeight.w900))),
+              const SizedBox(width: 12),
+              Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Text('${listing.ticker} (${listing.networkTag})',
+                  maxLines: 1, overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 15)),
+                const SizedBox(height: 4),
+                Text(subtitle, maxLines: 1, overflow: TextOverflow.ellipsis,
+                  style: TextStyle(fontSize: 10,
+                    color: error != null || asset == null ? Colors.orangeAccent : _muted)),
+              ])),
+              const SizedBox(width: 6),
+              Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
+                Text(quantity, style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 14)),
+                Text(usdLabel, style: const TextStyle(color: _muted, fontSize: 11)),
+              ]),
+              const SizedBox(width: 4),
+              Icon(expanded ? Icons.keyboard_arrow_up : Icons.keyboard_arrow_down,
+                size: 18, color: _muted),
+            ])),
+        ),
+        if (expanded) ...[
+          const Divider(height: 1),
+          Padding(padding: const EdgeInsets.fromLTRB(14, 12, 14, 15),
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text(listing.network.caution,
+                style: const TextStyle(fontSize: 11, color: _muted)),
+              if (error != null) ...[
+                const SizedBox(height: 8),
+                SelectableText(error,
+                  style: const TextStyle(color: Colors.orangeAccent, fontSize: 11)),
+              ],
+              const SizedBox(height: 10),
+              SelectableText(listing.addressOf(_addresses!),
+                style: const TextStyle(fontSize: 12)),
+              const SizedBox(height: 12),
+              Row(children: [
+                Expanded(child: OutlinedButton.icon(
+                  onPressed: () => _copyNetworkAddress(listing.network),
+                  icon: const Icon(Icons.copy, size: 15), label: const Text('Copy'))),
+                const SizedBox(width: 6),
+                Expanded(child: OutlinedButton.icon(
+                  onPressed: () => setState(() {
+                    _receiveNetwork = listing.network;
+                    _tab = 1;
+                  }),
+                  icon: const Icon(Icons.qr_code, size: 15), label: const Text('Receive'))),
+                const SizedBox(width: 6),
+                Expanded(child: OutlinedButton.icon(
+                  onPressed: () => setState(() {
+                    _sendNetwork = listing.network;
+                    _tab = 2;
+                  }),
+                  icon: const Icon(Icons.send_outlined, size: 14), label: const Text('Send'))),
+              ]),
+            ])),
+        ],
+      ]),
+    );
+  }
+
+  Widget _receiveView() {
+    final addresses = _addresses!;
+    final network = _receiveNetwork;
+    final address = network.addressOf(addresses);
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      _pill('NETWORK-SPECIFIC RECEIVE ADDRESSES'),
+      const SizedBox(height: 17),
+      const Text('Receive crypto', style: TextStyle(fontSize: 30, fontWeight: FontWeight.w900)),
+      const SizedBox(height: 8),
+      const Text('Choose the exact network. Addresses on EVM networks may look the same but balances remain separate.',
+        style: TextStyle(color: _muted)),
+      const SizedBox(height: 18),
+      DropdownButtonFormField<ReceiveNetwork>(
+        value: _receiveNetwork,
+        isExpanded: true,
+        decoration: const InputDecoration(labelText: 'Coin / Network'),
+        items: ReceiveNetwork.values.map((r) => DropdownMenuItem(
+          value: r, child: Text(r.label, overflow: TextOverflow.ellipsis),
+        )).toList(),
+        onChanged: (r) { if (r != null) setState(() => _receiveNetwork = r); },
+      ),
+      const SizedBox(height: 18),
+      Container(width: double.infinity, padding: const EdgeInsets.all(19),
+        decoration: BoxDecoration(color: _panel, borderRadius: BorderRadius.circular(22)),
+        child: Column(children: [
+          Text(network.label, textAlign: TextAlign.center,
+            style: const TextStyle(fontSize: 19, fontWeight: FontWeight.w800)),
+          const SizedBox(height: 5),
+          Text(network.derivationPath, style: const TextStyle(color: _muted, fontSize: 12)),
+          const SizedBox(height: 18),
+          Container(padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(14)),
+            child: QrImageView(data: address, size: 195, backgroundColor: Colors.white)),
+          const SizedBox(height: 16),
+          SelectableText(address, textAlign: TextAlign.center,
+            style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13)),
+          const SizedBox(height: 17),
+          ElevatedButton.icon(onPressed: () => _copyNetworkAddress(network),
+            icon: const Icon(Icons.copy), label: const Text('Copy address')),
+        ])),
+      const SizedBox(height: 14),
+      _InfoBanner(icon: Icons.warning_amber_outlined, text: network.caution),
+      const SizedBox(height: 12),
+      if (network.trackedAsset == null)
+        const Text('Preview address only · balance and token indexing for this network are not implemented.',
+          style: TextStyle(color: Colors.orangeAccent, fontSize: 12)),
+      const SizedBox(height: 12),
+      const Text('Not all chains are EVM. XRP, Bitcoin Lightning, SPL token accounts, and unlisted tokens need separate implementation. TRC-20 is TRON-specific and MUST NOT use an ERC-20 address.',
+        style: TextStyle(color: _muted, fontSize: 12)),
+    ]);
+  }
+
+  Widget _securityView() {
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      _pill('NO THIRD-PARTY CUSTODY'),
+      const SizedBox(height: 18),
+      const Text('Security & backup', style: TextStyle(fontSize: 32, fontWeight: FontWeight.w900)),
+      const SizedBox(height: 8),
+      const Text('Your recovery words are the only reliable way to recover this wallet if the device is lost.', style: TextStyle(color: _muted)),
+      const SizedBox(height: 24),
+      Card(margin: EdgeInsets.zero, child: Padding(padding: const EdgeInsets.all(20),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          const ListTile(contentPadding: EdgeInsets.zero, leading: Icon(Icons.shield_outlined, color: _mint),
+              title: Text('100% your keys'), subtitle: Text('No exchange or custodial account. Recovery words stay encrypted on this device; coins remain on their blockchains.')),
+          const Divider(),
+          const ListTile(contentPadding: EdgeInsets.zero, leading: Icon(Icons.lock, color: _mint),
+              title: Text('Encrypted device storage'), subtitle: Text('Uses Flutter Secure Storage, backed by OS protected encryption.')),
+          const Divider(),
+          const ListTile(contentPadding: EdgeInsets.zero, leading: Icon(Icons.gpp_maybe_outlined, color: Colors.orangeAccent),
+              title: Text('Important security limitations'), subtitle: Text('No app PIN, device authentication, memory zeroization, external audit or hardware-wallet integration yet.')),
+          const Divider(),
+          const ListTile(contentPadding: EdgeInsets.zero, leading: Icon(Icons.public, color: Colors.lightBlueAccent),
+              title: Text('Public balance checks'), subtitle: Text('On wallet open, every 5 minutes while foregrounded, and when Refresh is tapped, public addresses go to blockchain providers. USD market quotes come from CoinGecko. No recovery words are sent.')),
+          const SizedBox(height: 12),
+          OutlinedButton.icon(onPressed: _showRecoveryPhrase, icon: const Icon(Icons.visibility_outlined), label: const Text('Reveal recovery words'),
+              style: OutlinedButton.styleFrom(minimumSize: const Size.fromHeight(49))),
+        ]))),
+      const SizedBox(height: 20),
+      const Text('Standard derivation paths', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+      const SizedBox(height: 10),
+      ...ChainAsset.values.where((a) => a != ChainAsset.usdt && a != ChainAsset.usdtTrc20).map((a) =>
+        Padding(padding: const EdgeInsets.symmetric(vertical: 5), child: Row(children: [
+          SizedBox(width: 80, child: Text(a.symbol, style: const TextStyle(color: _mint))),
+          SelectableText(a.path, style: const TextStyle(color: _muted)),
+        ]))),
+      const SizedBox(height: 24),
+      OutlinedButton.icon(onPressed: _deleteWallet, icon: const Icon(Icons.delete_outline, color: Colors.redAccent),
+        label: const Text('Delete wallet from this device', style: TextStyle(color: Colors.redAccent)),
+        style: OutlinedButton.styleFrom(minimumSize: const Size.fromHeight(50))),
+      const SizedBox(height: 20),
+      const Text('v0.9 searchable assets + review-only send · Not audited · No warranty. Keep an offline recovery backup.', style: TextStyle(color: _muted, fontSize: 11)),
+    ]);
+  }
+
+  Widget _pill(String label) => Container(
+    decoration: BoxDecoration(color: const Color(0xFF163A36), borderRadius: BorderRadius.circular(20)),
+    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+    child: Text(label, style: const TextStyle(fontSize: 10, color: _mint, fontWeight: FontWeight.bold, letterSpacing: 1)),
+  );
+}
+
+class _PhraseGrid extends StatelessWidget {
+  final String phrase;
+  const _PhraseGrid({required this.phrase});
+  @override
+  Widget build(BuildContext context) {
+    final words = phrase.split(' ');
+    return LayoutBuilder(builder: (context, constraints) {
+      final columns = constraints.maxWidth > 370 ? 3 : 2;
+      final gap = 9.0;
+      final w = (constraints.maxWidth - gap * (columns - 1)) / columns;
+      return Wrap(spacing: gap, runSpacing: gap, children: [
+        for (var i = 0; i < words.length; i++)
+          Container(width: w, padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 9),
+            decoration: BoxDecoration(color: const Color(0xFF1A353A), borderRadius: BorderRadius.circular(10)),
+            child: Row(children: [
+              Text('${i + 1}.', style: const TextStyle(color: _muted, fontSize: 11)),
+              const SizedBox(width: 5),
+              Expanded(child: Text(words[i], style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13))),
+            ])),
+      ]);
+    });
+  }
+}
+
+class _InfoBanner extends StatelessWidget {
+  final IconData icon;
+  final String text;
+  const _InfoBanner({required this.icon, required this.text});
+  @override
+  Widget build(BuildContext context) => Container(
+    width: double.infinity,
+    padding: const EdgeInsets.all(15),
+    decoration: BoxDecoration(color: const Color(0xFF293026), borderRadius: BorderRadius.circular(14),
+      border: Border.all(color: const Color(0xFF5B5B3C))),
+    child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Icon(icon, color: const Color(0xFFF2D88B), size: 20),
+      const SizedBox(width: 12),
+      Expanded(child: Text(text, style: const TextStyle(color: Color(0xFFF3E7B5), height: 1.5, fontSize: 12))),
+    ]),
+  );
+}
