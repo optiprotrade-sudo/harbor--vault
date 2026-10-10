@@ -58,8 +58,9 @@ class WalletEngine {
     final ethHex = ethPrivateKey
         .map((byte) => byte.toRadixString(16).padLeft(2, '0'))
         .join();
-    // web3dart v3 documents .address.hex. USDT ERC20 uses same address.
-    final ethereumAddress = EthPrivateKey.fromHex(ethHex).address.hex;
+    // web3dart 3.0.3 uses wallet 0.0.18 EthereumAddress.eip55With0x.
+    // USDT on Ethereum uses the same account address.
+    final ethereumAddress = EthPrivateKey.fromHex(ethHex).address.eip55With0x;
 
     return PublicAddresses(
       bitcoin: _nativeSegwitAddress('bc', btcPublicKey),
