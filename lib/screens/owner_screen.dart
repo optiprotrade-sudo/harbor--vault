@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import '../models/asset.dart';
 import '../models/receive_network.dart';
 import '../models/wallet_listing.dart';
+import '../services/auto_lock_policy.dart';
 
 const _mint = Color(0xFF8DF0CB);
 
@@ -15,9 +16,12 @@ class OwnerScreen extends StatefulWidget {
   final Future<void> Function(String) onRename;
   final Future<void> Function() onVerifyBackup;
   final void Function() onLock;
+  final int autoLockMinutes;
+  final Future<void> Function(int) onAutoLockChanged;
   const OwnerScreen({super.key, required this.walletName,
     required this.addresses, required this.backupVerified,
-    required this.onRename, required this.onVerifyBackup, required this.onLock});
+    required this.onRename, required this.onVerifyBackup, required this.onLock,
+    required this.autoLockMinutes, required this.onAutoLockChanged});
 
   @override
   State<OwnerScreen> createState() => _OwnerScreenState();
@@ -70,6 +74,19 @@ class _OwnerScreenState extends State<OwnerScreen> {
         title: const Text('Recovery backup check'),
         subtitle: Text(widget.backupVerified ? 'Verified on this device' : 'Not yet verified'),
         trailing: TextButton(onPressed: widget.onVerifyBackup, child: const Text('Verify'))),
+      const Divider(),
+      ListTile(contentPadding: EdgeInsets.zero,
+        leading: const Icon(Icons.timer_outlined, color: _mint),
+        title: const Text('Auto-lock timer'),
+        subtitle: const Text('Inactive in app; background locks immediately'),
+        trailing: DropdownButton<int>(
+          value: widget.autoLockMinutes,
+          onChanged: (value) {
+            if (value != null) widget.onAutoLockChanged(value);
+          },
+          items: AutoLockPolicy.options.map((n) => DropdownMenuItem<int>(
+            value: n, child: Text('$n min'))).toList(),
+        )),
       const Divider(),
       ListTile(contentPadding: EdgeInsets.zero, leading: const Icon(Icons.lock_outline, color: _mint),
         title: const Text('Lock Harbor Vault'),

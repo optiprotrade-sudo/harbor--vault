@@ -18,9 +18,12 @@ class SendScreen extends StatefulWidget {
   final ReceiveNetwork initialNetwork;
   final Map<ChainAsset, String> balances;
   final Map<ChainAsset, double> usdPrices;
+  /// Fresh OS authentication is requested for each reviewed transfer.
+  final Future<bool> Function() authorizeReview;
   const SendScreen({super.key, required this.addresses,
     this.walletName = 'My Harbor Wallet', this.initialNetwork = ReceiveNetwork.bitcoin,
-    this.balances = const {}, this.usdPrices = const {}});
+    this.balances = const {}, this.usdPrices = const {},
+    required this.authorizeReview});
 
   @override
   State<SendScreen> createState() => _SendScreenState();
@@ -163,29 +166,57 @@ class _SendScreenState extends State<SendScreen> {
       return;
     }
     if (!mounted) return;
-    await showDialog<void>(context: context, builder: (ctx) => AlertDialog(
-      title: const Text('Review transfer · simulation'),
-      content: SingleChildScrollView(child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          _reviewLine('Asset', '${_entry.ticker} (${_entry.networkTag})'),
-          _reviewLine('Amount', '$amountText ${_entry.ticker}'),
-          _reviewLine('USD equivalent', _usdEquivalent),
-          _reviewLine('Fee estimate', _quote?.estimate ?? 'Unavailable'),
-          const SizedBox(height: 12),
-          const Text('To address', style: TextStyle(color: _muted)),
-          const SizedBox(height: 5),
-          SelectableText(_recipient.text.trim()),
-          const SizedBox(height: 16),
-          const Text('TEST ONLY · No coins are sent. Recipient checks are only format hints, not full checksums or token contract verification. No private keys are used.',
-            style: TextStyle(color: Colors.orangeAccent, fontSize: 12)),
+    bool verifying = false;
+    bool identityConfirmed = false;
+    await showDialog<void>(context: context, builder: (ctx) => StatefulBuilder(
+      builder: (dialogContext, updateDialog) => AlertDialog(
+        title: const Text('Review transfer · simulation'),
+        content: SingleChildScrollView(child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _reviewLine('Asset', '${_entry.ticker} (${_entry.networkTag})'),
+            _reviewLine('Amount', '$amountText ${_entry.ticker}'),
+            _reviewLine('USD equivalent', _usdEquivalent),
+            _reviewLine('Fee estimate', _quote?.estimate ?? 'Unavailable'),
+            const SizedBox(height: 12),
+            const Text('Recipient', style: TextStyle(color: _muted)),
+            const SizedBox(height: 5),
+            SelectableText(_recipient.text.trim()),
+            const SizedBox(height: 16),
+            Text(identityConfirmed
+              ? 'Identity verified for this review. No transaction was sent.'
+              : 'Confirm the full recipient address and amount, then verify with your phone security.',
+              style: const TextStyle(color: _mint, fontSize: 12)),
+            const SizedBox(height: 8),
+            const Text('TEST ONLY: No transaction is built, signed or broadcast. Network format checks are preliminary.',
+              style: TextStyle(color: Colors.orangeAccent, fontSize: 12)),
+          ],
+        )),
+        actions: [
+          TextButton(onPressed: verifying ? null : () => Navigator.of(ctx).pop(),
+            child: const Text('Close')),
+          FilledButton.icon(
+            onPressed: verifying || identityConfirmed ? null : () async {
+              updateDialog(() => verifying = true);
+              bool authorized = false;
+              try { authorized = await widget.authorizeReview(); }
+              catch (_) { authorized = false; }
+              if (!dialogContext.mounted) return;
+              updateDialog(() {
+                verifying = false;
+                identityConfirmed = authorized;
+              });
+              if (!authorized) _message('Phone authentication was cancelled or unavailable.');
+            },
+            icon: verifying ? const SizedBox(width: 14, height: 14,
+              child: CircularProgressIndicator(strokeWidth: 2))
+              : const Icon(Icons.fingerprint),
+            label: Text(identityConfirmed ? 'Verified · No sending'
+              : verifying ? 'Verifying…' : 'Verify identity'),
+          ),
         ],
-      )),
-      actions: [
-        TextButton(onPressed: () => Navigator.of(ctx).pop(), child: const Text('Close')),
-        const FilledButton(onPressed: null, child: Text('Broadcast disabled')),
-      ],
+      ),
     ));
   }
 
@@ -277,7 +308,7 @@ class _SendScreenState extends State<SendScreen> {
     children: [
       const Text('Send', style: TextStyle(fontSize: 29, fontWeight: FontWeight.w900)),
       const SizedBox(height: 6),
-      const Text('REVIEW MODE · Sending disabled until security testing is complete',
+      const Text('REVIEW MODE · OS verification required; real sending disabled',
         style: TextStyle(color: Colors.orangeAccent, fontSize: 11)),
       const SizedBox(height: 22),
       Container(

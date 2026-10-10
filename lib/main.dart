@@ -14,6 +14,7 @@ import 'services/price_service.dart';
 import 'services/portfolio_summary.dart';
 import 'services/vault_storage.dart';
 import 'services/device_auth_service.dart';
+import 'services/auto_lock_policy.dart';
 import 'services/wallet_preferences.dart';
 import 'services/wallet_engine.dart';
 
@@ -76,6 +77,8 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
   final _deviceAuth = DeviceAuthService();
   final _prefs = WalletPreferences();
   bool _authInProgress = false;
+  int _autoLockMinutes = AutoLockPolicy.defaultMinutes;
+  Timer? _idleLockTimer;
   bool _backupVerified = false;
   String _walletName = 'My Harbor Wallet';
   int _newWordCount = 12;
@@ -125,7 +128,10 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
         _page == _Page.wallet && !_authInProgress) {
       _lock();
     }
-    if (!wasForeground && _foreground && _page == _Page.wallet) _refresh();
+    if (!wasForeground && _foreground && _page == _Page.wallet) {
+      _recordUserActivity();
+      _refresh();
+    }
   }
 
   void _scheduleFirstCheck() {
@@ -138,6 +144,7 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _autoRefreshTimer?.cancel();
+    _idleLockTimer?.cancel();
     _word3.dispose();
     _word9.dispose();
     _importText.dispose();
@@ -151,14 +158,54 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
     try {
       // Never read or derive from the recovery phrase before device unlock.
       final exists = await _storage.exists();
+      final autoLockMinutes = await _prefs.getAutoLockMinutes();
       if (!mounted) return;
-      setState(() => _page = exists ? _Page.locked : _Page.welcome);
+      setState(() {
+        _autoLockMinutes = autoLockMinutes;
+        _page = exists ? _Page.locked : _Page.welcome;
+      });
     } catch (e) {
       if (mounted) setState(() {
         _error = 'Unable to open the encrypted wallet. Details: $e';
         _page = _Page.error;
       });
     }
+  }
+
+  // Pointer activity resets the in-app idle timeout; leaving the app locks
+  // immediately regardless of the chosen setting (to hide wallet contents).
+  void _recordUserActivity() {
+    if (!mounted || !_foreground || _page != _Page.wallet) return;
+    _idleLockTimer?.cancel();
+    _idleLockTimer = Timer(AutoLockPolicy.timeout(_autoLockMinutes), () {
+      if (!mounted || _page != _Page.wallet) return;
+      if (_authInProgress) {
+        _recordUserActivity(); // Avoid locking behind the OS identity dialog.
+      } else {
+        _lock();
+      }
+    });
+  }
+
+  Future<void> _updateAutoLockMinutes(int minutes) async {
+    if (!AutoLockPolicy.valid(minutes)) return;
+    try {
+      await _prefs.setAutoLockMinutes(minutes);
+      if (!mounted) return;
+      setState(() => _autoLockMinutes = minutes);
+      _recordUserActivity();
+    } catch (_) {
+      _snack('Could not save auto-lock setting.');
+    }
+  }
+
+  Future<bool> _approveSendReview() async {
+    // This is a separate, fresh OS authentication. It must NOT be cached from
+    // wallet unlock. Later: enforce this again inside real signing service.
+    final ok = await _authenticate(
+      'Verify your identity for this transfer review in Harbor Vault');
+    if (ok) _recordUserActivity();
+    return ok;
   }
 
   Future<bool> _authenticate(String reason) async {
@@ -192,6 +239,7 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
         _balances.clear(); _balanceErrors.clear(); _usdPrices.clear();
         _lastChecked = null;
       });
+      _recordUserActivity();
       _scheduleFirstCheck();
     } catch (e) {
       _snack('Could not open the encrypted wallet: $e');
@@ -201,7 +249,11 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
   }
 
   void _lock() {
+    _idleLockTimer?.cancel();
     if (_page != _Page.wallet) return;
+    // Prevent modal dialogs or bottom sheets from covering the locked screen.
+    final navigator = Navigator.maybeOf(context, rootNavigator: true);
+    navigator?.popUntil((route) => route.isFirst);
     setState(() {
       _page = _Page.locked;
       _addresses = null;
@@ -326,6 +378,7 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
         _refreshing = false;
         _expandedNetworks.clear();
       });
+      _recordUserActivity();
       _scheduleFirstCheck();
       _snack('Wallet saved in device encrypted storage.');
     } catch (e) {
@@ -519,7 +572,10 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
   Widget build(BuildContext context) {
     final desktop = MediaQuery.sizeOf(context).width >= 800;
     final wallet = _page == _Page.wallet;
-    return Scaffold(
+    return Listener(
+      behavior: HitTestBehavior.translucent,
+      onPointerDown: (_) => _recordUserActivity(),
+      child: Scaffold(
       appBar: AppBar(
         title: Row(mainAxisSize: MainAxisSize.min, children: [
           Container(width: 32, height: 32, alignment: Alignment.center,
@@ -532,7 +588,7 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
         actions: [
           if (wallet)
             const Padding(padding: EdgeInsets.only(right: 12), child: Center(
-              child: Text('SELF-CUSTODY  •  v1.0', style: TextStyle(fontSize: 10, color: _muted)))),
+              child: Text('SELF-CUSTODY  •  v1.1', style: TextStyle(fontSize: 10, color: _muted)))),
         ],
       ),
       body: wallet
@@ -572,7 +628,7 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
               NavigationDestination(icon: Icon(Icons.admin_panel_settings_outlined), label: 'Owner'),
             ],
           ) : null,
-    );
+    ));
   }
 
   Widget _onboarding() {
@@ -680,12 +736,15 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
           0 => _assetsView(),
           1 => _receiveView(),
           2 => SendScreen(addresses: _addresses!, initialNetwork: _sendNetwork,
-            balances: _balances, usdPrices: _usdPrices, walletName: _walletName),
+            balances: _balances, usdPrices: _usdPrices, walletName: _walletName,
+            authorizeReview: _approveSendReview),
           3 => HistoryScreen(addresses: _addresses!),
           4 => _securityView(),
           _ => OwnerScreen(walletName: _walletName, addresses: _addresses!,
             backupVerified: _backupVerified, onRename: _setWalletName,
-            onVerifyBackup: _verifyOfflineBackup, onLock: _lock),
+            onVerifyBackup: _verifyOfflineBackup, onLock: _lock,
+            autoLockMinutes: _autoLockMinutes,
+            onAutoLockChanged: _updateAutoLockMinutes),
         }),
     ));
   }
@@ -837,9 +896,11 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
     final usdValue = validPrice ? numeric! * quote! : null;
     final expanded = _expandedNetworks.contains(listing.network);
     final quantity = !_balancesVisible ? '•••• ${listing.ticker}'
-      : balance == null ? '— ${listing.ticker}' : '$balance ${listing.ticker}';
-    final usdLabel = !_balancesVisible ? '••••' : PortfolioSummary.formatUsd(usdValue);
-    final subtitle = asset == null ? 'Address only · balance not indexed'
+      : asset == null ? 'Not tracked'
+      : balance == null ? 'Unavailable' : '$balance ${listing.ticker}';
+    final usdLabel = !_balancesVisible ? '••••'
+      : asset == null ? '—' : PortfolioSummary.formatUsd(usdValue);
+    final subtitle = asset == null ? 'Address preview · balance not tracked'
       : error != null ? 'Balance unavailable · tap for details'
       : _refreshing && balance == null ? 'Checking…'
       : balance == null ? 'Not checked' : 'Balance checked';
@@ -988,6 +1049,23 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
           const ListTile(contentPadding: EdgeInsets.zero, leading: Icon(Icons.gpp_maybe_outlined, color: Colors.orangeAccent),
               title: Text('Important security limitations'), subtitle: Text('Uses phone PIN/fingerprint to unlock, but memory zeroization, independent audit and hardware-wallet integration are not implemented.')),
           const Divider(),
+          const ListTile(contentPadding: EdgeInsets.zero,
+              leading: Icon(Icons.fingerprint, color: _mint),
+              title: Text('Fingerprint / Face unlock / phone passcode'),
+              subtitle: Text('Uses Android identity verification. Face authentication depends on your device settings and OS support.')),
+          const Divider(),
+          ListTile(contentPadding: EdgeInsets.zero,
+              leading: const Icon(Icons.timer_outlined, color: _mint),
+              title: const Text('Auto-lock while using wallet'),
+              subtitle: const Text('Locks after inactivity. Switching away locks immediately.'),
+              trailing: DropdownButton<int>(
+                value: _autoLockMinutes,
+                onChanged: (value) { if (value != null) _updateAutoLockMinutes(value); },
+                items: AutoLockPolicy.options.map((minutes) => DropdownMenuItem<int>(
+                  value: minutes, child: Text('$minutes min'),
+                )).toList(),
+              )),
+          const Divider(),
           const ListTile(contentPadding: EdgeInsets.zero, leading: Icon(Icons.public, color: Colors.lightBlueAccent),
               title: Text('Public balance checks'), subtitle: Text('On wallet open, every 5 minutes while foregrounded, and when Refresh is tapped, public addresses go to blockchain providers. USD market quotes come from CoinGecko. No recovery words are sent.')),
           const SizedBox(height: 12),
@@ -1017,7 +1095,7 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
         label: const Text('Delete wallet from this device', style: TextStyle(color: Colors.redAccent)),
         style: OutlinedButton.styleFrom(minimumSize: const Size.fromHeight(50))),
       const SizedBox(height: 20),
-      const Text('v1.0 personal foundation · Sending remains disabled pending audits and on-chain test transfers. Keep an offline recovery backup.', style: TextStyle(color: _muted, fontSize: 11)),
+      const Text('v1.1 personal beta · Sending remains disabled pending audits and on-chain test transfers. Keep an offline recovery backup.', style: TextStyle(color: _muted, fontSize: 11)),
     ]);
   }
 
