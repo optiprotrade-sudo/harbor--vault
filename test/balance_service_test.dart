@@ -42,9 +42,23 @@ void main() {
     service.dispose();
   });
 
-  test('Litecoin balance is explicitly unsupported rather than fabricated', () async {
-    final service = BalanceService(MockClient((_) async => http.Response('{}', 200)));
-    await expectLater(service.fetch(ChainAsset.ltc, 'ltc1test'), throwsUnsupportedError);
+  test('Litecoin confirmed balance returns satoshis from public explorer', () async {
+    final service = BalanceService(MockClient((request) async {
+      expect(request.url.host, 'api.blockcypher.com');
+      expect(request.url.path, contains('/v1/ltc/main/addrs/ltc1qtest/balance'));
+      return http.Response(jsonEncode({
+        'balance': 120000000,
+        'unconfirmed_balance': 2000000,
+        'final_balance': 122000000,
+      }), 200);
+    }));
+    expect(await service.fetch(ChainAsset.ltc, 'ltc1qtest'), '1.2');
+    service.dispose();
+  });
+
+  test('Explorer failure must not become an invented zero balance', () async {
+    final service = BalanceService(MockClient((_) async => http.Response('error', 429)));
+    await expectLater(service.fetch(ChainAsset.ltc, 'ltc1qtest'), throwsException);
     service.dispose();
   });
 }
