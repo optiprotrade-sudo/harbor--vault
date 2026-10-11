@@ -17,6 +17,7 @@ import 'services/device_auth_service.dart';
 import 'services/auto_lock_policy.dart';
 import 'services/wallet_preferences.dart';
 import 'services/wallet_engine.dart';
+import 'services/notification_service.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -76,7 +77,16 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
   final _storage = VaultStorage();
   final _deviceAuth = DeviceAuthService();
   final _prefs = WalletPreferences();
+  final _noticeStore = VaultNotificationStore();
+  List<VaultNotice> _notices = [];
+  bool _notificationsOpen = false;
+  int _noticeSequence = 0;
+  Future<void> _noticeWrites = Future<void>.value();
   bool _authInProgress = false;
+  // Prevents biometric retry loops. Only a fresh launch or a real return from
+  // the background reopens the OS authentication prompt automatically.
+  bool _promptWhenForeground = false;
+  String? _unlockError;
   int _autoLockMinutes = AutoLockPolicy.defaultMinutes;
   Timer? _idleLockTimer;
   bool _backupVerified = false;
@@ -124,14 +134,149 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
   void didChangeAppLifecycleState(AppLifecycleState state) {
     final wasForeground = _foreground;
     _foreground = state == AppLifecycleState.resumed;
-    if ((state == AppLifecycleState.paused || state == AppLifecycleState.hidden) &&
-        _page == _Page.wallet && !_authInProgress) {
-      _lock();
+    if (state == AppLifecycleState.paused || state == AppLifecycleState.hidden) {
+      if (_page == _Page.wallet && !_authInProgress) {
+        _lock(); // Hide wallet contents immediately on backgrounding.
+        _promptWhenForeground = true;
+      } else if (_page == _Page.locked && !_authInProgress) {
+        _promptWhenForeground = true;
+      }
     }
-    if (!wasForeground && _foreground && _page == _Page.wallet) {
-      _recordUserActivity();
-      _refresh();
+    if (!wasForeground && _foreground) {
+      if (_page == _Page.locked && _promptWhenForeground && !_authInProgress) {
+        _promptWhenForeground = false;
+        _queueAutomaticUnlock();
+      } else if (_page == _Page.wallet) {
+        _recordUserActivity();
+        _refresh();
+      }
     }
+  }
+
+  Future<void> _loadNotices() async {
+    try {
+      final items = await _noticeStore.load();
+      if (mounted) setState(() => _notices = items);
+    } catch (_) {
+      // A broken or unavailable notification log must not block wallet unlock.
+      if (mounted) setState(() => _notices = []);
+    }
+  }
+
+  void _saveNotices() {
+    final snapshot = List<VaultNotice>.of(_notices);
+    // Serialise writes so a slow earlier save cannot overwrite a newer one.
+    _noticeWrites = _noticeWrites.then((_) => _noticeStore.save(snapshot))
+      .catchError((Object _) {});
+  }
+
+  void _notify(String title, String message, {String kind = 'info'}) {
+    if (!mounted) return;
+    final now = DateTime.now();
+    final notice = VaultNotice(
+      id: '${now.microsecondsSinceEpoch}-${_noticeSequence++}',
+      createdAt: now, title: title, message: message, kind: kind);
+    setState(() => _notices = VaultNoticeHistory.add(_notices, notice));
+    _saveNotices();
+  }
+
+  void _markRead(String id) {
+    setState(() => _notices = _notices.map((n) =>
+      n.id == id ? n.markRead() : n).toList());
+    _saveNotices();
+  }
+
+  void _markAllRead() {
+    setState(() => _notices = VaultNoticeHistory.markAllRead(_notices));
+    _saveNotices();
+  }
+
+  Future<void> _clearNotices() async {
+    setState(() => _notices = []);
+    _saveNotices();
+  }
+
+  void _toggleNotifications() =>
+      setState(() => _notificationsOpen = !_notificationsOpen);
+
+  void _closeNotifications() {
+    if (_notificationsOpen) setState(() => _notificationsOpen = false);
+  }
+
+  Widget _notificationsPanel(double availableHeight) {
+    final height = availableHeight < 500 ? availableHeight * .90 : 490.0;
+    return Container(
+      width: 380, height: height,
+      decoration: BoxDecoration(color: const Color(0xFF14282F),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: const Color(0xFF34575A)),
+        boxShadow: const [BoxShadow(color: Colors.black54, blurRadius: 24)]),
+      child: Column(children: [
+        Padding(padding: const EdgeInsets.fromLTRB(16, 14, 8, 10), child: Row(children: [
+          const Icon(Icons.notifications_outlined, color: _mint),
+          const SizedBox(width: 8),
+          const Expanded(child: Text('Notifications', style: TextStyle(
+            fontSize: 18, fontWeight: FontWeight.w800))),
+          IconButton(onPressed: _closeNotifications, tooltip: 'Close notifications',
+            icon: const Icon(Icons.close)),
+        ])),
+        if (_notices.isNotEmpty)
+          Padding(padding: const EdgeInsets.symmetric(horizontal: 12), child: Row(children: [
+            TextButton(onPressed: VaultNoticeHistory.unreadCount(_notices) == 0
+              ? null : _markAllRead, child: const Text('Mark all read')),
+            const Spacer(),
+            TextButton(onPressed: () async {
+              final clear = await showDialog<bool>(context: context,
+                builder: (dialogContext) => AlertDialog(
+                  title: const Text('Clear notification history?'),
+                  content: const Text('This only clears notifications saved on this phone. It does not change blockchain transactions.'),
+                  actions: [
+                    TextButton(onPressed: () => Navigator.pop(dialogContext, false), child: const Text('Cancel')),
+                    TextButton(onPressed: () => Navigator.pop(dialogContext, true), child: const Text('Clear')),
+                  ],
+                ));
+              if (clear == true && mounted) await _clearNotices();
+            }, child: const Text('Clear all')),
+          ])),
+        const Divider(height: 1, color: Color(0xFF365157)),
+        Expanded(child: _notices.isEmpty
+          ? const Center(child: Padding(padding: EdgeInsets.all(22),
+              child: Text('No notifications yet. Wallet activity will appear here on this device.',
+                textAlign: TextAlign.center, style: TextStyle(color: _muted))))
+          : ListView.separated(
+              padding: const EdgeInsets.symmetric(vertical: 5),
+              itemCount: _notices.length,
+              separatorBuilder: (_, __) => const Divider(height: 1, color: Color(0xFF294148)),
+              itemBuilder: (ctx, i) {
+                final n = _notices[i];
+                final time = '${n.createdAt.day}/${n.createdAt.month} '
+                  '${n.createdAt.hour.toString().padLeft(2, '0')}:'
+                  '${n.createdAt.minute.toString().padLeft(2, '0')}';
+                final symbol = n.kind == 'security' ? Icons.shield_outlined
+                    : n.kind == 'warning' ? Icons.warning_amber_outlined
+                    : n.kind == 'wallet' ? Icons.account_balance_wallet_outlined
+                    : Icons.notifications_none;
+                return ListTile(
+                  onTap: () => _markRead(n.id),
+                  leading: Icon(symbol, color: n.kind == 'warning'
+                      ? Colors.amberAccent : _mint, size: 22),
+                  title: Row(children: [
+                    Expanded(child: Text(n.title, style: TextStyle(
+                      fontWeight: n.read ? FontWeight.w500 : FontWeight.bold,
+                      fontSize: 13))),
+                    if (!n.read) const CircleAvatar(radius: 4, backgroundColor: _mint),
+                  ]),
+                  subtitle: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    Text(n.message, style: const TextStyle(color: _muted, fontSize: 12)),
+                    const SizedBox(height: 4),
+                    Text(time, style: const TextStyle(color: _muted, fontSize: 10)),
+                  ]),
+                  isThreeLine: true,
+                );
+              },
+            )),
+      ]),
+    );
   }
 
   void _scheduleFirstCheck() {
@@ -157,6 +302,7 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
   Future<void> _boot() async {
     try {
       // Never read or derive from the recovery phrase before device unlock.
+      await _loadNotices();
       final exists = await _storage.exists();
       final autoLockMinutes = await _prefs.getAutoLockMinutes();
       if (!mounted) return;
@@ -164,12 +310,30 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
         _autoLockMinutes = autoLockMinutes;
         _page = exists ? _Page.locked : _Page.welcome;
       });
+      // The first visible screen for an existing wallet is ALWAYS the lock
+      // screen, never the asset dashboard. Prompt for OS authentication on
+      // launch without requiring an extra tap on an in-app Security page.
+      if (exists) {
+        if (_foreground) {
+          _queueAutomaticUnlock();
+        } else {
+          _promptWhenForeground = true;
+        }
+      }
     } catch (e) {
       if (mounted) setState(() {
         _error = 'Unable to open the encrypted wallet. Details: $e';
         _page = _Page.error;
       });
     }
+  }
+
+  void _queueAutomaticUnlock() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_foreground || _page != _Page.locked ||
+          _saving || _authInProgress) return;
+      _unlockWallet();
+    });
   }
 
   // Pointer activity resets the in-app idle timeout; leaving the app locks
@@ -204,7 +368,13 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
     // wallet unlock. Later: enforce this again inside real signing service.
     final ok = await _authenticate(
       'Verify your identity for this transfer review in Harbor Vault');
-    if (ok) _recordUserActivity();
+    if (ok) {
+      _recordUserActivity();
+      _notify('Transfer review verified',
+        'Identity confirmed for a simulated transfer review. No funds were sent.', kind: 'security');
+    } else {
+      _notify('Transfer review not approved', 'Device authentication was cancelled or unavailable.', kind: 'warning');
+    }
     return ok;
   }
 
@@ -216,14 +386,16 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
   }
 
   Future<void> _unlockWallet() async {
-    if (_saving || _page != _Page.locked) return;
-    setState(() => _saving = true);
+    if (_saving || _authInProgress || _page != _Page.locked || !_foreground) return;
+    _promptWhenForeground = false;
+    setState(() { _saving = true; _unlockError = null; });
     try {
       final authorized = await _authenticate(
         'Unlock Harbor Vault using your phone fingerprint or passcode');
       if (!authorized) {
-        _snack('Phone authentication unavailable or cancelled. Configure a screen lock in Android Settings.');
-        return;
+        if (mounted) setState(() => _unlockError =
+          'Unable to verify. Please try again with fingerprint, supported face unlock, or your phone screen lock.');
+        return; // Fail closed; do not load recovery data.
       }
       final phrase = await _storage.getPhrase();
       if (phrase == null) throw StateError('No encrypted phrase was found.');
@@ -236,13 +408,17 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
         _walletName = walletName;
         _backupVerified = verified;
         _page = _Page.wallet;
+        _unlockError = null;
         _balances.clear(); _balanceErrors.clear(); _usdPrices.clear();
         _lastChecked = null;
       });
       _recordUserActivity();
+      _notify('Wallet unlocked', 'Device authentication succeeded.', kind: 'security');
       _scheduleFirstCheck();
-    } catch (e) {
-      _snack('Could not open the encrypted wallet: $e');
+    } catch (_) {
+      if (mounted) setState(() => _unlockError =
+        'The encrypted wallet could not be opened. Check your device security settings and try again.');
+      // Avoid displaying internal storage errors and wallet details on lock UI.
     } finally {
       if (mounted) setState(() => _saving = false);
     }
@@ -256,6 +432,7 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
     navigator?.popUntil((route) => route.isFirst);
     setState(() {
       _page = _Page.locked;
+      _unlockError = null;
       _addresses = null;
       _balances.clear(); _balanceErrors.clear(); _usdPrices.clear();
       _lastChecked = null;
@@ -263,7 +440,9 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
       _refreshing = false;
       _expandedNetworks.clear();
       _tab = 0;
+      _notificationsOpen = false;
     });
+    _notify('Wallet locked', 'Your wallet was locked and must be authenticated to reopen.', kind: 'security');
   }
 
   Future<void> _setWalletName(String name) async {
@@ -308,6 +487,7 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
       await _prefs.setBackupVerified(true);
       if (mounted) setState(() => _backupVerified = true);
       _snack('Paper backup verified on this device.');
+      _notify('Backup verified', 'Offline recovery backup check was completed.', kind: 'security');
     } else {
       _snack('Not verified. Keep your offline recovery phrase safe.');
     }
@@ -381,6 +561,7 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
       _recordUserActivity();
       _scheduleFirstCheck();
       _snack('Wallet saved in device encrypted storage.');
+      _notify('Wallet saved', 'Recovery data was saved to device-encrypted storage.', kind: 'wallet');
     } catch (e) {
       if (mounted) _snack('Could not save the wallet: $e');
     } finally {
@@ -424,6 +605,14 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
         _lastChecked = DateTime.now();
         _refreshing = false;
       });
+      final errors = _balanceErrors.length;
+      if (errors == 0 && _priceError == null) {
+        _notify('Balances refreshed', 'Public balance and price checks completed.', kind: 'wallet');
+      } else {
+        _notify('Balance check incomplete',
+          'Some public providers did not respond. Unavailable balances are not zero.',
+          kind: 'warning');
+      }
     }
   }
 
@@ -453,6 +642,7 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
     if (address == null) return;
     await Clipboard.setData(ClipboardData(text: address));
     _snack('${asset.symbol} public address copied. Verify the network before depositing.');
+    _notify('Address copied', 'A public receiving address was copied. Verify its network.', kind: 'wallet');
   }
 
   Future<void> _copyNetworkAddress(ReceiveNetwork network) async {
@@ -460,6 +650,7 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
     if (addresses == null) return;
     await Clipboard.setData(ClipboardData(text: network.addressOf(addresses)));
     _snack('Address copied for ${network.label}. Double-check the exact sending network.');
+    _notify('Receive address copied', 'A public network address was copied.', kind: 'wallet');
   }
 
   ReceiveNetwork _networkForAsset(ChainAsset asset) => switch (asset) {
@@ -486,7 +677,7 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
       builder: (ctx) => AlertDialog(
         title: const Text('Show recovery words?'),
         content: Column(mainAxisSize: MainAxisSize.min, children: [
-          const Text('Anyone who sees these words can take all funds. Close screen recording and make sure nobody is watching. This version does NOT enforce app authentication.'),
+          const Text('Anyone who sees these words can take all funds. Close screen recording and make sure nobody is watching. Phone authentication is required before revealing them.'),
           const SizedBox(height: 12),
           TextField(controller: confirmation, decoration: const InputDecoration(labelText: 'Type SHOW to continue')),
         ]),
@@ -546,7 +737,10 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
     try {
       await _storage.remove();
       await _prefs.resetForNewWallet();
+      await _noticeWrites;
+      await _noticeStore.clear();
       if (!mounted) return;
+      setState(() { _notices = []; _notificationsOpen = false; });
       setState(() {
         _addresses = null;
         _backupVerified = false;
@@ -577,26 +771,43 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
       onPointerDown: (_) => _recordUserActivity(),
       child: Scaffold(
       appBar: AppBar(
-        title: Row(mainAxisSize: MainAxisSize.min, children: [
+        title: GestureDetector(onTap: _closeNotifications, behavior: HitTestBehavior.opaque,
+          child: Row(mainAxisSize: MainAxisSize.min, children: [
           Container(width: 32, height: 32, alignment: Alignment.center,
             decoration: BoxDecoration(color: _mint, borderRadius: BorderRadius.circular(10)),
             child: const Icon(Icons.anchor_rounded, color: _bg, size: 21)),
           const SizedBox(width: 10),
           const Text('HARBOR', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900, letterSpacing: 2)),
           const Text(' VAULT', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w300, letterSpacing: 1)),
-        ]),
+        ])),
         actions: [
-          if (wallet)
-            const Padding(padding: EdgeInsets.only(right: 12), child: Center(
-              child: Text('SELF-CUSTODY  •  v1.1', style: TextStyle(fontSize: 10, color: _muted)))),
+          if (wallet) Padding(padding: const EdgeInsets.only(right: 10),
+            child: Stack(clipBehavior: Clip.none, alignment: Alignment.center, children: [
+              IconButton(onPressed: _toggleNotifications, tooltip: 'Notifications',
+                icon: Icon(_notificationsOpen ? Icons.notifications : Icons.notifications_none,
+                  color: _mint, size: 27)),
+              if (VaultNoticeHistory.unreadCount(_notices) > 0)
+                Positioned(right: 0, top: 3, child: IgnorePointer(child: Container(
+                  constraints: const BoxConstraints(minWidth: 17),
+                  padding: const EdgeInsets.symmetric(horizontal: 3, vertical: 2),
+                  decoration: const BoxDecoration(color: Color(0xFFE86666),
+                    borderRadius: BorderRadius.all(Radius.circular(12))),
+                  child: Text(VaultNoticeHistory.unreadCount(_notices) > 99
+                      ? '99+' : '${VaultNoticeHistory.unreadCount(_notices)}',
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(color: Colors.white, fontSize: 9,
+                      fontWeight: FontWeight.w900)),
+                ))),
+            ])),
         ],
       ),
       body: wallet
-        ? Row(children: [
+        ? LayoutBuilder(builder: (context, bounds) => Stack(children: [
+          Row(children: [
             if (desktop) NavigationRail(
               backgroundColor: _bg,
               selectedIndex: _tab,
-              onDestinationSelected: (value) => setState(() => _tab = value),
+              onDestinationSelected: (value) => setState(() { _tab = value; _notificationsOpen = false; }),
               labelType: NavigationRailLabelType.all,
               destinations: const [
                 NavigationRailDestination(icon: Icon(Icons.account_balance_wallet_outlined), selectedIcon: Icon(Icons.account_balance_wallet), label: Text('Assets')),
@@ -608,7 +819,18 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
               ],
             ),
             Expanded(child: _walletContent()),
-          ])
+          ]),
+          if (_notificationsOpen) ...[
+            Positioned.fill(child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: _closeNotifications,
+              child: const ColoredBox(color: Colors.transparent))),
+            Positioned(right: 10, top: 7,
+              child: ConstrainedBox(
+                constraints: BoxConstraints(maxWidth: bounds.maxWidth - 20),
+                child: _notificationsPanel(bounds.maxHeight))),
+          ],
+        ]))
         : SafeArea(child: Center(child: ConstrainedBox(
             constraints: const BoxConstraints(maxWidth: 610),
             child: SingleChildScrollView(padding: const EdgeInsets.all(24), child: _onboarding()),
@@ -618,7 +840,7 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
             backgroundColor: const Color(0xFF0E222A),
             labelBehavior: NavigationDestinationLabelBehavior.onlyShowSelected,
             selectedIndex: _tab,
-            onDestinationSelected: (value) => setState(() => _tab = value),
+            onDestinationSelected: (value) => setState(() { _tab = value; _notificationsOpen = false; }),
             destinations: const [
               NavigationDestination(icon: Icon(Icons.account_balance_wallet_outlined), selectedIcon: Icon(Icons.account_balance_wallet), label: 'Assets'),
               NavigationDestination(icon: Icon(Icons.qr_code), label: 'Receive'),
@@ -636,20 +858,25 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
     if (_page == _Page.locked) return Column(
       mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        const Icon(Icons.lock_outline, size: 62, color: _mint),
-        const SizedBox(height: 20),
-        const Text('Harbor Vault is locked', textAlign: TextAlign.center,
-          style: TextStyle(fontSize: 26, fontWeight: FontWeight.w900)),
+        const Icon(Icons.fingerprint, size: 76, color: _mint),
+        const SizedBox(height: 24),
+        const Text('Welcome back!', textAlign: TextAlign.center,
+          style: TextStyle(fontSize: 30, fontWeight: FontWeight.w900)),
         const SizedBox(height: 12),
-        const Text('Unlock using your phone fingerprint, PIN, pattern or passcode. Your private keys remain encrypted on this device.',
-          textAlign: TextAlign.center, style: TextStyle(color: _muted)),
+        const Text('Unlock Harbor Vault with your phone security',
+          textAlign: TextAlign.center, style: TextStyle(color: _muted, fontSize: 16)),
+        const SizedBox(height: 14),
+        if (_unlockError != null) Padding(
+          padding: const EdgeInsets.symmetric(vertical: 8),
+          child: Text(_unlockError!, textAlign: TextAlign.center,
+            style: const TextStyle(color: Colors.redAccent, fontSize: 13))),
         const SizedBox(height: 24),
         ElevatedButton.icon(onPressed: _saving ? null : _unlockWallet,
           icon: const Icon(Icons.fingerprint),
-          label: Text(_saving ? 'Unlocking…' : 'Unlock wallet')),
-        const SizedBox(height: 12),
-        const Text('If the phone has no secure screen lock, enable one in Android Settings. Recovery words are required if you uninstall or replace the app.',
-          textAlign: TextAlign.center, style: TextStyle(color: _muted, fontSize: 11)),
+          label: Text(_saving ? 'Verifying…' : 'Try fingerprint / face / screen lock')),
+        const SizedBox(height: 14),
+        const Text('The wallet remains hidden until Android verifies your identity. Cancel or failed verification never opens the wallet.',
+          textAlign: TextAlign.center, style: TextStyle(color: _muted, fontSize: 12)),
       ],
     );
     if (_page == _Page.error) return Column(mainAxisSize: MainAxisSize.min, children: [
@@ -737,7 +964,9 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
           1 => _receiveView(),
           2 => SendScreen(addresses: _addresses!, initialNetwork: _sendNetwork,
             balances: _balances, usdPrices: _usdPrices, walletName: _walletName,
-            authorizeReview: _approveSendReview),
+            authorizeReview: _approveSendReview,
+            onReviewOpened: () => _notify('Transfer preview opened',
+              'A simulated transfer was reviewed. No funds were sent.', kind: 'wallet')),
           3 => HistoryScreen(addresses: _addresses!),
           4 => _securityView(),
           _ => OwnerScreen(walletName: _walletName, addresses: _addresses!,
@@ -1095,7 +1324,7 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
         label: const Text('Delete wallet from this device', style: TextStyle(color: Colors.redAccent)),
         style: OutlinedButton.styleFrom(minimumSize: const Size.fromHeight(50))),
       const SizedBox(height: 20),
-      const Text('v1.1 personal beta · Sending remains disabled pending audits and on-chain test transfers. Keep an offline recovery backup.', style: TextStyle(color: _muted, fontSize: 11)),
+      const Text('About Harbor Vault • Version 1.3.0 (personal beta)\nSending remains disabled pending audits and on-chain test transfers. Keep an offline recovery backup.', style: TextStyle(color: _muted, fontSize: 11)),
     ]);
   }
 

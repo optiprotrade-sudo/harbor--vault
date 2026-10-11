@@ -20,10 +20,11 @@ class SendScreen extends StatefulWidget {
   final Map<ChainAsset, double> usdPrices;
   /// Fresh OS authentication is requested for each reviewed transfer.
   final Future<bool> Function() authorizeReview;
+  final VoidCallback? onReviewOpened;
   const SendScreen({super.key, required this.addresses,
     this.walletName = 'My Harbor Wallet', this.initialNetwork = ReceiveNetwork.bitcoin,
     this.balances = const {}, this.usdPrices = const {},
-    required this.authorizeReview});
+    required this.authorizeReview, this.onReviewOpened});
 
   @override
   State<SendScreen> createState() => _SendScreenState();
@@ -166,6 +167,7 @@ class _SendScreenState extends State<SendScreen> {
       return;
     }
     if (!mounted) return;
+    widget.onReviewOpened?.call();
     bool verifying = false;
     bool identityConfirmed = false;
     await showDialog<void>(context: context, builder: (ctx) => StatefulBuilder(

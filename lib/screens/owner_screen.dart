@@ -4,6 +4,7 @@ import '../models/asset.dart';
 import '../models/receive_network.dart';
 import '../models/wallet_listing.dart';
 import '../services/auto_lock_policy.dart';
+import '../services/wallet_preferences.dart';
 
 const _mint = Color(0xFF8DF0CB);
 
@@ -28,6 +29,49 @@ class OwnerScreen extends StatefulWidget {
 }
 
 class _OwnerScreenState extends State<OwnerScreen> {
+  static const _manualChecks = <String, String>{
+    'new_wallet': 'Create a fresh test wallet and verify the offline phrase',
+    'restore': 'Restore the same phrase on a separate test device',
+    'addresses': 'Compare BTC, ETH, LTC, SOL and TRON addresses with trusted wallets',
+    'lock': 'Test unlock, 1/2/3-minute timers and background lock',
+    'notices': 'Test notification bell, unread badge, outside tap and persistence',
+    'balances': 'Test success/failure of public balance lookups; no false zero',
+    'send_review': 'Test network selection, fee options and protected send review',
+    'history': 'Check transaction histories where indexing is available',
+    'signing': 'Implement and test transaction signing/broadcast on testnets',
+    'audit': 'Complete independent key/recovery/signing security review',
+    'release': 'Configure stable Android release signing and update testing',
+  };
+
+  final _prefs = WalletPreferences();
+  Set<String> _completed = {};
+  bool _savingChecklist = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadChecklist();
+  }
+
+  Future<void> _loadChecklist() async {
+    final completed = await _prefs.getChecklistDone();
+    if (mounted) setState(() => _completed = completed);
+  }
+
+  Future<void> _toggleCheck(String id, bool checked) async {
+    final next = Set<String>.of(_completed);
+    if (checked) { next.add(id); } else { next.remove(id); }
+    setState(() { _completed = next; _savingChecklist = true; });
+    try {
+      await _prefs.setChecklistDone(next);
+    } catch (_) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Text('Could not save the testing checklist.')));
+    } finally {
+      if (mounted) setState(() => _savingChecklist = false);
+    }
+  }
+
   Future<void> _rename() async {
     final controller = TextEditingController(text: widget.walletName);
     final value = await showDialog<String>(context: context, builder: (ctx) => AlertDialog(
@@ -108,9 +152,45 @@ class _OwnerScreenState extends State<OwnerScreen> {
     const Text('Security model: no seed phrase or private key on any admin server. The same address may be used on several EVM networks. Not all networks are tracked or supported for sending.',
       style: TextStyle(color: Colors.white70, fontSize: 12)),
     const SizedBox(height: 18),
+    Card(child: ExpansionTile(
+      leading: const Icon(Icons.fact_check_outlined, color: _mint),
+      title: const Text('Personal testing checklist', style: TextStyle(fontWeight: FontWeight.bold)),
+      subtitle: Text('${_completed.length} / ${_manualChecks.length} marked • Stored on device',
+        style: const TextStyle(fontSize: 12)),
+      children: [
+        const Padding(padding: EdgeInsets.fromLTRB(16, 0, 16, 8), child: Text(
+          'These are your own testing notes, NOT automated proof of security. No real funds until signing and recovery are independently reviewed.',
+          style: TextStyle(color: Colors.orangeAccent, fontSize: 12))),
+        ..._manualChecks.entries.map((entry) => CheckboxListTile(
+          dense: true, activeColor: _mint, checkColor: Colors.black,
+          title: Text(entry.value, style: const TextStyle(fontSize: 12)),
+          value: _completed.contains(entry.key),
+          onChanged: _savingChecklist ? null : (checked) => _toggleCheck(entry.key, checked ?? false),
+        )),
+        TextButton.icon(onPressed: _savingChecklist || _completed.isEmpty ? null
+            : () async {
+                setState(() { _completed = {}; _savingChecklist = true; });
+                try { await _prefs.setChecklistDone(<String>{}); }
+                catch (_) {
+                  if (mounted) ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('Checklist could not be reset.')));
+                } finally {
+                  if (mounted) setState(() => _savingChecklist = false);
+                }
+              },
+          icon: const Icon(Icons.restart_alt), label: const Text('Reset checklist')),
+      ],
+    )),
+    const SizedBox(height: 12),
+    const ListTile(
+      leading: Icon(Icons.info_outline, color: _mint),
+      title: Text('About Harbor Vault'),
+      subtitle: Text('Version 1.3.0 • Personal beta • No live sending'),
+    ),
+    const SizedBox(height: 18),
     const Card(child: Padding(padding: EdgeInsets.all(15), child: Column(
       crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Text('Before real funds', style: TextStyle(fontWeight: FontWeight.w800)),
+        Text('Before real funds' , style: TextStyle(fontWeight: FontWeight.w800)),
         SizedBox(height: 8),
         Text('• Independently verify mnemonic and derivation paths.\n'
           '• Test restoring funds on a different compatible wallet.\n'

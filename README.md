@@ -1,9 +1,31 @@
-# Harbor Vault v1.0 — Personal beta
+# Harbor Vault v1.2 — private wallet beta
 
-A **non-custodial, Android-first receive-and-review prototype**. It includes multi-chain receiving address previews, public balance reads, 17 network/asset list entries, review-only Send interface, device authentication, recovery phrase verification, basic public history and a device-local Owner panel.
+Flutter Android-first personal wallet prototype. Uses local device authentication,
+encrypted recovery phrase storage, first-address derivation on selected chains,
+public balance lookups, a review-only Send UI, read-only history on selected
+networks, an on-device Owner Panel and a local notification inbox.
 
-**This app cannot send cryptocurrency. Do not fund it.** It has not undergone a security review, account-discovery testing or live mainnet signing validation. Generating an address does **not** mean it is safe to deposit funds.
+**This is not safe for real funds.** Sending/broadcasting is disabled. Key
+recovery and derivation, blockchain tracking and application security have not
+been independently audited or fully tested against reference wallets.
 
-Read `V10-RELEASE-NOTES.md` and `V10-ONE-UPDATE-INSTRUCTIONS.txt` before installing or updating. The `.github/workflows/build-android-apk.yml` workflow builds the APK without installing Flutter on your Windows machine.
+See **START-HERE.txt** for the single-upload GitHub update process and
+**RELEASE-v1.2.md** for the exact changes.
 
-No private keys should be committed to GitHub. The repository only contains publicly distributable source code.
+A locally persisted notice is not a blockchain event or an official receipt.
+Encrypted data may be lost when uninstalling the app. Keep test-wallet recovery
+phrases off-device and never upload them to GitHub.
+
+
+## v1.3 combined security and notification update
+
+Build includes the full v1.2 notification inbox and owner test checklist, plus
+launch/return-to-app authentication. Existing encrypted wallets remain locked
+until Android device authentication succeeds. Fingerprint/compatible biometric
+methods and system device credentials are managed by Android `local_auth`.
+Cancelling authentication leaves a retry screen. The inactivity timer remains
+1/2/3 minutes; backgrounding locks immediately.
+
+This is NOT a completed cryptocurrency wallet. Mainnet signing and sending are
+still disabled, and restoring derived addresses has not been independently
+validated. Do not store real funds.

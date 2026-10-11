@@ -2,7 +2,7 @@ $ErrorActionPreference = 'Stop'
 $repo = 'https://github.com/optiprotrade-sudo/harbor--vault.git'
 $source = Split-Path -Parent $MyInvocation.MyCommand.Path
 $work = Join-Path ([System.IO.Path]::GetTempPath()) ('harbor-vault-update-' + [guid]::NewGuid().ToString('N'))
-Write-Host 'Harbor Vault v1.1: single GitHub update to optiprotrade-sudo/harbor--vault' -ForegroundColor Cyan
+Write-Host 'Harbor Vault v1.3: single GitHub update to optiprotrade-sudo/harbor--vault' -ForegroundColor Cyan
 Write-Host 'No wallet keys, signing keys, phone data or private backups are uploaded.'
 $confirm = Read-Host 'Type APPLY to clone and prepare the update'
 if ($confirm -cne 'APPLY') { Write-Host 'Cancelled.'; exit 0 }
@@ -27,7 +27,7 @@ try {
   if ($LASTEXITCODE -ne 0) { throw 'Could not stage changes' }
   & git diff --cached --quiet
   if ($LASTEXITCODE -eq 0) { Write-Host 'Nothing new to commit'; exit 0 }
-  & git commit -m 'Harbor Vault v1.1 idle-lock and transfer-review authentication'
+  & git commit -m 'Harbor Vault v1.3 combined notifications and auto device unlock'
   if ($LASTEXITCODE -ne 0) { throw 'Commit failed. Configure git user.name and user.email if requested.' }
   & git push origin HEAD:main
   if ($LASTEXITCODE -ne 0) { throw 'Push failed. Your local clone is at ' + $work }

@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'auto_lock_policy.dart';
 
@@ -7,6 +9,7 @@ class WalletPreferences {
   static const backupKey = 'harbor_vault_backup_verified_v1';
   static const autoRefreshKey = 'harbor_vault_auto_refresh_v1';
   static const autoLockKey = 'harbor_vault_auto_lock_minutes_v1';
+  static const checklistKey = 'harbor_vault_manual_test_checklist_v12';
 
   final FlutterSecureStorage _storage;
   WalletPreferences({FlutterSecureStorage? storage})
@@ -42,7 +45,23 @@ class WalletPreferences {
   Future<void> setBackupVerified(bool value) =>
       _storage.write(key: backupKey, value: value.toString());
 
+  Future<Set<String>> getChecklistDone() async {
+    try {
+      final raw = await _storage.read(key: checklistKey);
+      if (raw == null) return <String>{};
+      final data = jsonDecode(raw);
+      if (data is! List) return <String>{};
+      return data.whereType<String>().take(50).toSet();
+    } catch (_) {
+      return <String>{};
+    }
+  }
+
+  Future<void> setChecklistDone(Set<String> done) async =>
+      _storage.write(key: checklistKey, value: jsonEncode(done.toList()));
+
   Future<void> resetForNewWallet() async {
+    await _storage.delete(key: checklistKey);
     await _storage.delete(key: backupKey);
   }
 }

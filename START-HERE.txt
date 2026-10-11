@@ -1,0 +1,48 @@
+HARBOR VAULT v1.3 — ONE COMPLETE GITHUB UPDATE (v1.2 + fingerprint-first launch)
+
+This ZIP contains the WHOLE Flutter source at ZIP ROOT, not a nested project directory.
+It is not a compiled APK. It has no wallet/private keys or recovery words.
+
+SINGLE-PUSH (Git for Windows installed):
+1. Back up your test-wallet seed on paper. Do not uninstall an installed wallet without verified recovery.
+2. Extract this ZIP. Open the extracted folder (do not place the ZIP itself in GitHub).
+3. Run PUSH-TO-GITHUB.bat (or .ps1) on your Windows computer.
+4. Type APPLY, then review the changes and type PUSH. The script clones the EXISTING
+   optiprotrade-sudo/harbor--vault main branch and copies all needed source and workflows.
+5. GitHub > Actions > Build Harbor Vault Android APK > Run workflow > main.
+6. Wait for GREEN success. Download the APK artifact ZIP. Extract app-release.apk.
+7. An APK update may fail if signed with a different key. Never uninstall without
+   verified written recovery and a proven restoration test. Use a stable release
+   signing process before real funds or production.
+
+NO GIT INSTALLED? Extract this ZIP, upload the CONTENTS of these root paths
+into their corresponding locations in the existing GitHub repository:
+lib/, test/, scripts/, .github/workflows/, pubspec.yaml, analysis_options.yaml.
+They should not be wrapped in an extra folder; preserve dot-folder .github.
+
+FEATURES:
+- Auto device verification on app launch/return if a wallet already exists.
+  The wallet is never shown under the authentication prompt. Cancel or fail
+  leaves a retry screen. Manual retry supports Android device credentials.
+- 1/2/3 minute inactivity timeout retained; immediate lock on background.
+- Notification bell instead of version label, local notification inbox,
+  unread counter, mark read, mark all, clear, tap outside to close.
+- Local event records for wallet unlock/lock, backup verified, public-address
+  copy, public balance checks and simulated send reviews.
+- Version information under Security and Owner.
+- Owner's expandable, saved manual testing checklist.
+- Older v1.1 security and send-review features retained.
+
+LIMITATIONS / SAFETY:
+- This is a development prototype. MAINNET SENDING IS NOT IMPLEMENTED.
+- Supported-address display DOES NOT mean address discovery or spending
+  from an existing funded wallet is verified. No real deposits.
+- Notifications are LOCAL activity notes, not real blockchain push alerts.
+  They can be lost when app data is cleared/uninstalled. No cloud service.
+- No seed phrase, private key or destination/amount is saved to notifications.
+- SHA/ZIP/static checks are not a Flutter compilation or independent audit.
+
+This update INCLUDES all previous v1.2 notification/owner/test features.
+You do NOT need to install or upload v1.2 separately.
+
+For issues: GitHub Actions > failed job > failed step > view the error lines.
