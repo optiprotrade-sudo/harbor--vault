@@ -35,7 +35,7 @@ jobs:
       - name: Resolve Dart dependencies
         run: flutter pub get
 
-      - name: Verify v1.3 combined files and paths
+      - name: Verify v1.4 unlock and settings files and paths
         run: python3 scripts/sanity_check.py
 
       - name: Run wallet tests (stop build if they fail)
@@ -47,7 +47,7 @@ jobs:
       - name: Upload downloadable APK
         uses: actions/upload-artifact@v4
         with:
-          name: Harbor-Vault-Android-APK-v1.3-Personal-Beta
+          name: Harbor-Vault-Android-APK-v1.4-Personal-Beta
           path: build/app/outputs/flutter-apk/app-release.apk
           if-no-files-found: error
           retention-days: 30
