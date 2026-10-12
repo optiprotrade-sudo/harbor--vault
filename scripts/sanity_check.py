@@ -2,7 +2,7 @@
 from pathlib import Path
 root=Path(__file__).resolve().parents[1]
 expected = {
-    'lib/main.dart': ['Icons.notifications_none', 'VaultNoticeHistory', 'HistoryScreen(', 'OwnerScreen(', '_Page.locked', '_queueAutomaticUnlock', 'Welcome back!', '_unlockError'],
+    'lib/main.dart': ['Icons.notifications_none', 'VaultNoticeHistory', 'HistoryScreen(', 'OwnerScreen(', '_Page.locked', '_queueAutomaticUnlock', 'Welcome back', '_unlockError', 'UnlockPromptCoordinator'],
     'lib/screens/send_screen.dart': ['Review transfer · simulation', 'Verify identity', 'Choose coin & network'],
     'lib/screens/owner_screen.dart': ['Owner panel', 'testing checklist', 'About Harbor Vault'],
     'lib/screens/history_screen.dart': ['Blockchain history'],
@@ -12,10 +12,12 @@ expected = {
     'test/notification_service_test.dart': ['unreadCount', 'history is capped'],
     'lib/services/device_auth_service.dart': ['LocalAuthentication', 'AuthenticationOptions(', 'biometricOnly: false'],
     'lib/services/auto_lock_policy.dart': ['defaultMinutes = 2', 'options = [1, 2, 3]'],
-    'lib/screens/owner_screen.dart': ['Version 1.3.0', 'testing checklist'],
+    'lib/screens/owner_screen.dart': ['Version 1.4.0', 'testing checklist'],
+    'lib/services/unlock_prompt_coordinator.dart': ['beginAutomatic', 'beginManual', 'appResumed'],
+    'test/unlock_prompt_coordinator_test.dart': ['real background return', 'fresh launch automatically'],
     'lib/services/wallet_preferences.dart': ['getAutoLockMinutes', 'setAutoLockMinutes'],
     'test/auto_lock_policy_test.dart': ['AutoLockPolicy.timeout'],
-    'pubspec.yaml': ['local_auth:', 'version: 1.3.0+13'],
+    'pubspec.yaml': ['local_auth:', 'version: 1.4.0+14'],
     'scripts/prepare_android.py': ['FlutterFragmentActivity', 'android.permission.USE_BIOMETRIC'],
 }
 for rel,required in expected.items():
@@ -23,4 +25,4 @@ for rel,required in expected.items():
     for marker in required:
         if marker not in t:
             raise SystemExit(f'Missing expected v1.3 feature: {rel} does not include {marker!r}')
-print('Consolidated v1.3 static preflight passed. Flutter compilation and security audit are separate.')
+print('Consolidated v1.4 static preflight passed. Flutter compilation and security audit are separate.')

@@ -3,7 +3,6 @@ import 'package:flutter/services.dart';
 import '../models/asset.dart';
 import '../models/receive_network.dart';
 import '../models/wallet_listing.dart';
-import '../services/auto_lock_policy.dart';
 import '../services/wallet_preferences.dart';
 
 const _mint = Color(0xFF8DF0CB);
@@ -102,72 +101,88 @@ class _OwnerScreenState extends State<OwnerScreen> {
   }
 
   @override
-  Widget build(BuildContext context) => Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-    const Text('Owner panel', style: TextStyle(fontWeight: FontWeight.w900, fontSize: 29)),
-    const SizedBox(height: 6),
-    const Text('Private device administration · No hosted dashboard or remote custody',
-      style: TextStyle(color: Colors.white70, fontSize: 12)),
-    const SizedBox(height: 18),
-    Card(child: Padding(padding: const EdgeInsets.all(17), child: Column(children: [
-      ListTile(contentPadding: EdgeInsets.zero, leading: const Icon(Icons.wallet, color: _mint),
-        title: Text(widget.walletName), subtitle: const Text('Personal wallet · on this device'),
-        trailing: IconButton(tooltip: 'Rename wallet', onPressed: _rename,
-          icon: const Icon(Icons.edit_outlined))),
-      const Divider(),
-      ListTile(contentPadding: EdgeInsets.zero, leading: const Icon(Icons.verified_user_outlined, color: _mint),
-        title: const Text('Recovery backup check'),
-        subtitle: Text(widget.backupVerified ? 'Verified on this device' : 'Not yet verified'),
-        trailing: TextButton(onPressed: widget.onVerifyBackup, child: const Text('Verify'))),
-      const Divider(),
-      ListTile(contentPadding: EdgeInsets.zero,
-        leading: const Icon(Icons.timer_outlined, color: _mint),
-        title: const Text('Auto-lock timer'),
-        subtitle: const Text('Inactive in app; background locks immediately'),
-        trailing: DropdownButton<int>(
-          value: widget.autoLockMinutes,
-          onChanged: (value) {
-            if (value != null) widget.onAutoLockChanged(value);
-          },
-          items: AutoLockPolicy.options.map((n) => DropdownMenuItem<int>(
-            value: n, child: Text('$n min'))).toList(),
-        )),
-      const Divider(),
-      ListTile(contentPadding: EdgeInsets.zero, leading: const Icon(Icons.lock_outline, color: _mint),
-        title: const Text('Lock Harbor Vault'),
-        subtitle: const Text('Require phone passcode / fingerprint again'),
-        trailing: IconButton(tooltip: 'Lock now', onPressed: widget.onLock,
-          icon: const Icon(Icons.lock_clock))),
-    ]))),
-    const SizedBox(height: 18),
-    Wrap(spacing: 12, runSpacing: 12, children: [
-      _stat('${ReceiveNetwork.values.length}', 'Address/network entries', Icons.hub_outlined),
-      _stat('${WalletListing.all.length}', 'Listed assets', Icons.toll_outlined),
-      _stat('0', 'Remote key access', Icons.shield_outlined),
-    ]),
-    const SizedBox(height: 18),
-    OutlinedButton.icon(onPressed: _copyPublicAddresses,
-      icon: const Icon(Icons.copy_all_outlined),
-      label: const Text('Copy all public addresses')),
-    const SizedBox(height: 10),
-    const Text('Security model: no seed phrase or private key on any admin server. The same address may be used on several EVM networks. Not all networks are tracked or supported for sending.',
-      style: TextStyle(color: Colors.white70, fontSize: 12)),
-    const SizedBox(height: 18),
-    Card(child: ExpansionTile(
-      leading: const Icon(Icons.fact_check_outlined, color: _mint),
-      title: const Text('Personal testing checklist', style: TextStyle(fontWeight: FontWeight.bold)),
-      subtitle: Text('${_completed.length} / ${_manualChecks.length} marked • Stored on device',
-        style: const TextStyle(fontSize: 12)),
-      children: [
-        const Padding(padding: EdgeInsets.fromLTRB(16, 0, 16, 8), child: Text(
-          'These are your own testing notes, NOT automated proof of security. No real funds until signing and recovery are independently reviewed.',
-          style: TextStyle(color: Colors.orangeAccent, fontSize: 12))),
-        ..._manualChecks.entries.map((entry) => CheckboxListTile(
-          dense: true, activeColor: _mint, checkColor: Colors.black,
-          title: Text(entry.value, style: const TextStyle(fontSize: 12)),
-          value: _completed.contains(entry.key),
-          onChanged: _savingChecklist ? null : (checked) => _toggleCheck(entry.key, checked ?? false),
-        )),
-        TextButton.icon(onPressed: _savingChecklist || _completed.isEmpty ? null
+  Widget build(BuildContext context) => Column(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+      const Text('Owner', style: TextStyle(fontWeight: FontWeight.w900, fontSize: 30)),
+      const SizedBox(height: 6),
+      const Text('Manage your personal wallet without exposing private keys or '
+          'opening a remote admin panel.',
+        style: TextStyle(color: Colors.white70, fontSize: 13, height: 1.4)),
+      const SizedBox(height: 18),
+      Card(child: ExpansionTile(
+        key: const PageStorageKey('owner_wallet'),
+        initiallyExpanded: true,
+        leading: const Icon(Icons.account_balance_wallet_outlined, color: _mint),
+        title: const Text('Wallet profile', style: TextStyle(fontWeight: FontWeight.w800)),
+        subtitle: Text(widget.walletName, style: const TextStyle(fontSize: 12)),
+        childrenPadding: const EdgeInsets.fromLTRB(16, 0, 16, 15),
+        children: [
+          ListTile(contentPadding: EdgeInsets.zero,
+            leading: const Icon(Icons.edit_outlined, color: _mint),
+            title: const Text('Wallet name'),
+            subtitle: Text(widget.walletName),
+            trailing: TextButton(onPressed: _rename, child: const Text('Rename'))),
+          const Divider(height: 8),
+          ListTile(contentPadding: EdgeInsets.zero,
+            leading: const Icon(Icons.verified_user_outlined, color: _mint),
+            title: const Text('Recovery backup'),
+            subtitle: Text(widget.backupVerified ? 'Checked on this device' : 'Not verified'),
+            trailing: TextButton(onPressed: widget.onVerifyBackup, child: const Text('Verify'))),
+          const Divider(height: 8),
+          ListTile(contentPadding: EdgeInsets.zero,
+            leading: const Icon(Icons.lock_outline, color: _mint),
+            title: const Text('Lock wallet now'),
+            subtitle: Text('Auto-lock: ${widget.autoLockMinutes} min • Change in Security'),
+            trailing: IconButton(onPressed: widget.onLock,
+              tooltip: 'Lock wallet', icon: const Icon(Icons.lock_clock))),
+        ],
+      )),
+      const SizedBox(height: 10),
+      Card(child: ExpansionTile(
+        key: const PageStorageKey('owner_networks'),
+        leading: const Icon(Icons.hub_outlined, color: _mint),
+        title: const Text('Networks & public addresses',
+          style: TextStyle(fontWeight: FontWeight.w800)),
+        subtitle: const Text('View counts or copy receiving addresses',
+          style: TextStyle(fontSize: 12)),
+        childrenPadding: const EdgeInsets.fromLTRB(16, 0, 16, 17),
+        children: [
+          Wrap(spacing: 10, runSpacing: 10, children: [
+            _stat('${ReceiveNetwork.values.length}', 'Networks', Icons.hub_outlined),
+            _stat('${WalletListing.all.length}', 'Assets listed', Icons.toll_outlined),
+          ]),
+          const SizedBox(height: 14),
+          OutlinedButton.icon(onPressed: _copyPublicAddresses,
+            icon: const Icon(Icons.copy_all_outlined),
+            label: const Text('Copy all public addresses')),
+          const SizedBox(height: 12),
+          const Text('Some EVM networks share an address. Not all assets are '
+            'balance-tracked or supported for sending.',
+            style: TextStyle(color: Colors.white70, fontSize: 12, height: 1.5)),
+        ],
+      )),
+      const SizedBox(height: 10),
+      Card(child: ExpansionTile(
+        key: const PageStorageKey('owner_checklist'),
+        leading: const Icon(Icons.fact_check_outlined, color: _mint),
+        title: const Text('Personal testing checklist',
+          style: TextStyle(fontWeight: FontWeight.w800)),
+        subtitle: Text('${_completed.length} / ${_manualChecks.length} marked • Saved on device',
+          style: const TextStyle(fontSize: 12)),
+        children: [
+          const Padding(padding: EdgeInsets.fromLTRB(16, 0, 16, 8), child: Text(
+            'These are personal test notes, not proof that cryptocurrency is safe '
+            'to deposit. Security review is still required.',
+            style: TextStyle(color: Colors.orangeAccent, fontSize: 12))),
+          ..._manualChecks.entries.map((entry) => CheckboxListTile(
+            dense: true, activeColor: _mint, checkColor: Colors.black,
+            title: Text(entry.value, style: const TextStyle(fontSize: 12)),
+            value: _completed.contains(entry.key),
+            onChanged: _savingChecklist ? null : (checked) =>
+              _toggleCheck(entry.key, checked ?? false),
+          )),
+          TextButton.icon(onPressed: _savingChecklist || _completed.isEmpty ? null
             : () async {
                 setState(() { _completed = {}; _savingChecklist = true; });
                 try { await _prefs.setChecklistDone(<String>{}); }
@@ -178,29 +193,31 @@ class _OwnerScreenState extends State<OwnerScreen> {
                   if (mounted) setState(() => _savingChecklist = false);
                 }
               },
-          icon: const Icon(Icons.restart_alt), label: const Text('Reset checklist')),
-      ],
-    )),
-    const SizedBox(height: 12),
-    const ListTile(
-      leading: Icon(Icons.info_outline, color: _mint),
-      title: Text('About Harbor Vault'),
-      subtitle: Text('Version 1.3.0 • Personal beta • No live sending'),
-    ),
-    const SizedBox(height: 18),
-    const Card(child: Padding(padding: EdgeInsets.all(15), child: Column(
-      crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Text('Before real funds' , style: TextStyle(fontWeight: FontWeight.w800)),
-        SizedBox(height: 8),
-        Text('• Independently verify mnemonic and derivation paths.\n'
-          '• Test restoring funds on a different compatible wallet.\n'
-          '• Implement and audit chain-specific signing and broadcasting.\n'
-          '• Add multi-account/address discovery and proper transaction indexing.\n'
-          '• Verify Android signing and update strategy.\n'
-          '• Obtain an independent security audit.',
-          style: TextStyle(color: Colors.white70, height: 1.6, fontSize: 12)),
-      ]))),
-  ]);
+            icon: const Icon(Icons.restart_alt), label: const Text('Reset checklist')),
+        ],
+      )),
+      const SizedBox(height: 10),
+      const Card(child: ExpansionTile(
+        key: PageStorageKey('owner_about'),
+        leading: Icon(Icons.info_outline, color: _mint),
+        title: Text('About & limitations',
+          style: TextStyle(fontWeight: FontWeight.w800)),
+        subtitle: Text('Version 1.4.0 • Personal beta', style: TextStyle(fontSize: 12)),
+        childrenPadding: EdgeInsets.fromLTRB(16, 0, 16, 18),
+        children: [
+          Text('Your wallet is private to this device; no server can control '
+              'its keys. Sending and broadcasting are still disabled.',
+            style: TextStyle(color: Colors.white70, height: 1.5)),
+          SizedBox(height: 12),
+          Text('Before real funds: independently verify mnemonic recovery and '
+              'derivation paths, implement and audit signing/broadcast, test '
+              'multi-address discovery, and configure stable Android release signing.',
+            style: TextStyle(color: Colors.orangeAccent, height: 1.5)),
+        ],
+      )),
+      const SizedBox(height: 22),
+    ],
+  );
 
   Widget _stat(String value, String label, IconData icon) => Container(
     width: 155, padding: const EdgeInsets.all(14),

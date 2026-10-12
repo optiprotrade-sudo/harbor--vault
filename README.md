@@ -1,31 +1,28 @@
-# Harbor Vault v1.2 — private wallet beta
+# Harbor Vault v1.4 — Personal Android Wallet Beta
 
-Flutter Android-first personal wallet prototype. Uses local device authentication,
-encrypted recovery phrase storage, first-address derivation on selected chains,
-public balance lookups, a review-only Send UI, read-only history on selected
-networks, an on-device Owner Panel and a local notification inbox.
+Harbor Vault is a Flutter, non-custodial **prototype** for one owner. It has
+receive-address previews for multiple chains, selective public balance and
+history lookups, a review-only Send screen, local encrypted seed storage,
+notification history, and a private Owner Panel.
 
-**This is not safe for real funds.** Sending/broadcasting is disabled. Key
-recovery and derivation, blockchain tracking and application security have not
-been independently audited or fully tested against reference wallets.
+The **v1.4 update** fixes the duplicate Android biometric prompt with a
+single-attempt unlock coordinator, turns the locked background into a
+**Welcome back** screen, and groups Security/Owner options into concise
+expandable cards. Its automatic biometric retry is disabled at the OS wrapper
+level; manual retry remains available. The owner can select 1-, 2-, or 3-minute
+inactivity locking; leaving the app locks it immediately.
 
-See **START-HERE.txt** for the single-upload GitHub update process and
-**RELEASE-v1.2.md** for the exact changes.
+The locked screen must not reveal wallet addresses, recovery words or balances.
+Device biometric/face/PIN behavior depends on the Android phone and enrolled
+unlock methods. The app never stores an unlock PIN itself.
 
-A locally persisted notice is not a blockchain event or an official receipt.
-Encrypted data may be lost when uninstalling the app. Keep test-wallet recovery
-phrases off-device and never upload them to GitHub.
+See **START-HERE.txt** for updating the existing private GitHub repository using
+a single push, and **RELEASE-v1.4.md** for the release change log and test plan.
 
+## Development and security status
 
-## v1.3 combined security and notification update
-
-Build includes the full v1.2 notification inbox and owner test checklist, plus
-launch/return-to-app authentication. Existing encrypted wallets remain locked
-until Android device authentication succeeds. Fingerprint/compatible biometric
-methods and system device credentials are managed by Android `local_auth`.
-Cancelling authentication leaves a retry screen. The inactivity timer remains
-1/2/3 minutes; backgrounding locks immediately.
-
-This is NOT a completed cryptocurrency wallet. Mainnet signing and sending are
-still disabled, and restoring derived addresses has not been independently
-validated. Do not store real funds.
+**Not approved for real funds.** Sending and broadcasting are disabled.
+Address derivation, recovery, account discovery, signing, backup behavior and
+third-party providers have not completed independent security testing. The
+public balance APIs can see which addresses you query. Keep recovery words
+private and offline; never upload them or signing keys to GitHub.

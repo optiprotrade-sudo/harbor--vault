@@ -17,7 +17,9 @@ class DeviceAuthService {
         localizedReason: reason,
         options: const AuthenticationOptions(
           biometricOnly: false,
-          stickyAuth: true,
+          // We manage the app resume lifecycle ourselves. `stickyAuth: true`
+          // may reopen the OS prompt when returning from it on some devices.
+          stickyAuth: false,
           sensitiveTransaction: true,
         ),
       );

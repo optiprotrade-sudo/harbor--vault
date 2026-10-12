@@ -1,48 +1,52 @@
-HARBOR VAULT v1.3 — ONE COMPLETE GITHUB UPDATE (v1.2 + fingerprint-first launch)
+HARBOR VAULT v1.4 — ONE CLEAN GITHUB UPDATE
 
-This ZIP contains the WHOLE Flutter source at ZIP ROOT, not a nested project directory.
-It is not a compiled APK. It has no wallet/private keys or recovery words.
+This ZIP is the complete source project, NOT an APK. Its files are at ZIP ROOT.
+It includes all prior v1.3 features; DO NOT upload earlier patch ZIPs too.
 
-SINGLE-PUSH (Git for Windows installed):
-1. Back up your test-wallet seed on paper. Do not uninstall an installed wallet without verified recovery.
-2. Extract this ZIP. Open the extracted folder (do not place the ZIP itself in GitHub).
-3. Run PUSH-TO-GITHUB.bat (or .ps1) on your Windows computer.
-4. Type APPLY, then review the changes and type PUSH. The script clones the EXISTING
-   optiprotrade-sudo/harbor--vault main branch and copies all needed source and workflows.
-5. GitHub > Actions > Build Harbor Vault Android APK > Run workflow > main.
-6. Wait for GREEN success. Download the APK artifact ZIP. Extract app-release.apk.
-7. An APK update may fail if signed with a different key. Never uninstall without
-   verified written recovery and a proven restoration test. Use a stable release
-   signing process before real funds or production.
+HOW TO UPDATE YOUR EXISTING PRIVATE REPOSITORY ON WINDOWS
+1. Keep an offline written backup of any existing test-wallet recovery phrase.
+   Do not uninstall the previous APK without validating recovery.
+2. Extract this ZIP to a regular folder (not to the GitHub upload field).
+3. With Git for Windows installed, double-click PUSH-TO-GITHUB.bat.
+4. Type APPLY to clone optiprotrade-sudo/harbor--vault into a temporary directory.
+5. Review the Git status, then type PUSH to commit one consolidated update.
+6. On GitHub: Actions > Build Harbor Vault Android APK > Run workflow > main.
+7. If successful, download the Artifacts ZIP and extract app-release.apk.
 
-NO GIT INSTALLED? Extract this ZIP, upload the CONTENTS of these root paths
-into their corresponding locations in the existing GitHub repository:
-lib/, test/, scripts/, .github/workflows/, pubspec.yaml, analysis_options.yaml.
-They should not be wrapped in an extra folder; preserve dot-folder .github.
+NO GIT FOR WINDOWS?
+Upload the CONTENTS (not the outer folder) of the following paths to the
+corresponding GitHub repository paths: lib/, test/, scripts/, .github/workflows/,
+pubspec.yaml, and analysis_options.yaml. Keep .github as a dot-folder.
+GitHub web UI cannot replace all existing files safely with a single folder
+upload in every case; prefer the Git script or GitHub Desktop.
 
-FEATURES:
-- Auto device verification on app launch/return if a wallet already exists.
-  The wallet is never shown under the authentication prompt. Cancel or fail
-  leaves a retry screen. Manual retry supports Android device credentials.
-- 1/2/3 minute inactivity timeout retained; immediate lock on background.
-- Notification bell instead of version label, local notification inbox,
-  unread counter, mark read, mark all, clear, tap outside to close.
-- Local event records for wallet unlock/lock, backup verified, public-address
-  copy, public balance checks and simulated send reviews.
-- Version information under Security and Owner.
-- Owner's expandable, saved manual testing checklist.
-- Older v1.1 security and send-review features retained.
+WHAT v1.4 CHANGES
+- New full-screen locked state: Welcome back, fingerprint icon and manual retry.
+- One automatic Android identity request per launch or genuine background return.
+- No double request after Android's fingerprint window resumes the activity;
+  OS sticky automatic retry is disabled.
+- Cancelling or failing remains locked and does not prompt automatically again
+  until a real background/return or a deliberate tap on Unlock.
+- Security options grouped: Unlock, Backup, Privacy, Advanced.
+- Owner grouped: Wallet Profile, Networks, Testing, About.
+- 1/2/3 minute inactivity timeout; background locks immediately.
+- v1.2 notification bell, read/unread history and owner checklist preserved.
 
-LIMITATIONS / SAFETY:
-- This is a development prototype. MAINNET SENDING IS NOT IMPLEMENTED.
-- Supported-address display DOES NOT mean address discovery or spending
-  from an existing funded wallet is verified. No real deposits.
-- Notifications are LOCAL activity notes, not real blockchain push alerts.
-  They can be lost when app data is cleared/uninstalled. No cloud service.
-- No seed phrase, private key or destination/amount is saved to notifications.
-- SHA/ZIP/static checks are not a Flutter compilation or independent audit.
+TEST ON YOUR PHONE (test wallet, not real funds)
+A. Launch an existing wallet: Welcome back remains behind ONE Android prompt.
+B. Cancel biometric prompt: still locked, no new automatic prompt; tap Unlock.
+C. Try successful fingerprint, failed fingerprint and device PIN fallback.
+D. Switch to another app and back: lock and ONE prompt again.
+E. Wait 1/2/3 minutes inactive while wallet open: it locks.
+F. Navigate Security and Owner expansion cards, verify settings persisted.
+G. Notification bell still functions and doesn't reveal wallet while locked.
+H. Send review still needs a FRESH authentication; NO FUNDS are sent.
 
-This update INCLUDES all previous v1.2 notification/owner/test features.
-You do NOT need to install or upload v1.2 separately.
-
-For issues: GitHub Actions > failed job > failed step > view the error lines.
+LIMITATIONS
+The app has not been built with Flutter in this environment; GitHub must run
+its Dart tests and Android compilation. A clean ZIP is NOT proof that the code
+compiles or has been security audited. Mainnet transfers remain disabled.
+Not all address previews are balance-indexed or independently validated.
+Do not hold or deposit real cryptocurrency in this prototype.
+Use a stable Android signing key for future updates; changing signatures may
+prevent installation over the previous APK. Backups and restoration tests first.

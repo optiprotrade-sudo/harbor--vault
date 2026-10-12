@@ -15,6 +15,7 @@ import 'services/portfolio_summary.dart';
 import 'services/vault_storage.dart';
 import 'services/device_auth_service.dart';
 import 'services/auto_lock_policy.dart';
+import 'services/unlock_prompt_coordinator.dart';
 import 'services/wallet_preferences.dart';
 import 'services/wallet_engine.dart';
 import 'services/notification_service.dart';
@@ -76,6 +77,7 @@ class VaultScreen extends StatefulWidget {
 class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
   final _storage = VaultStorage();
   final _deviceAuth = DeviceAuthService();
+  final _unlockCoordinator = UnlockPromptCoordinator();
   final _prefs = WalletPreferences();
   final _noticeStore = VaultNotificationStore();
   List<VaultNotice> _notices = [];
@@ -83,9 +85,6 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
   int _noticeSequence = 0;
   Future<void> _noticeWrites = Future<void>.value();
   bool _authInProgress = false;
-  // Prevents biometric retry loops. Only a fresh launch or a real return from
-  // the background reopens the OS authentication prompt automatically.
-  bool _promptWhenForeground = false;
   String? _unlockError;
   int _autoLockMinutes = AutoLockPolicy.defaultMinutes;
   Timer? _idleLockTimer;
@@ -132,19 +131,27 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    final wasForeground = _foreground;
-    _foreground = state == AppLifecycleState.resumed;
-    if (state == AppLifecycleState.paused || state == AppLifecycleState.hidden) {
-      if (_page == _Page.wallet && !_authInProgress) {
-        _lock(); // Hide wallet contents immediately on backgrounding.
-        _promptWhenForeground = true;
-      } else if (_page == _Page.locked && !_authInProgress) {
-        _promptWhenForeground = true;
-      }
+    // An Android biometric dialog can briefly send `inactive` even though
+    // the user has not left the app. Never treat that as a new login session.
+    if (state == AppLifecycleState.inactive) return;
+
+    if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.hidden) {
+      _foreground = false;
+      // The system authentication overlay may cause paused/hidden too. The
+      // coordinator ignores it while an unlock attempt is in flight.
+      if (_unlockCoordinator.promptInFlight || _authInProgress) return;
+      if (_page == _Page.wallet) _lock();
+      _unlockCoordinator.appBackgrounded();
+      return;
     }
-    if (!wasForeground && _foreground) {
-      if (_page == _Page.locked && _promptWhenForeground && !_authInProgress) {
-        _promptWhenForeground = false;
+
+    if (state == AppLifecycleState.resumed) {
+      _foreground = true;
+      _unlockCoordinator.appResumed(locked: _page == _Page.locked);
+      if (_page == _Page.locked &&
+          _unlockCoordinator.hasPendingAutomatic &&
+          !_unlockCoordinator.promptInFlight && !_authInProgress) {
         _queueAutomaticUnlock();
       } else if (_page == _Page.wallet) {
         _recordUserActivity();
@@ -314,11 +321,8 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
       // screen, never the asset dashboard. Prompt for OS authentication on
       // launch without requiring an extra tap on an in-app Security page.
       if (exists) {
-        if (_foreground) {
-          _queueAutomaticUnlock();
-        } else {
-          _promptWhenForeground = true;
-        }
+        _unlockCoordinator.existingWalletFound();
+        if (_foreground) _queueAutomaticUnlock();
       }
     } catch (e) {
       if (mounted) setState(() {
@@ -332,7 +336,7 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted || !_foreground || _page != _Page.locked ||
           _saving || _authInProgress) return;
-      _unlockWallet();
+      _unlockWallet(automatic: true);
     });
   }
 
@@ -385,18 +389,23 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
     finally { _authInProgress = false; }
   }
 
-  Future<void> _unlockWallet() async {
+  Future<void> _unlockWallet({bool automatic = false}) async {
     if (_saving || _authInProgress || _page != _Page.locked || !_foreground) return;
-    _promptWhenForeground = false;
+    final started = automatic
+        ? _unlockCoordinator.beginAutomatic(locked: true, foreground: _foreground)
+        : _unlockCoordinator.beginManual(locked: true);
+    if (!started) return;
     setState(() { _saving = true; _unlockError = null; });
     try {
       final authorized = await _authenticate(
-        'Unlock Harbor Vault using your phone fingerprint or passcode');
+        'Welcome back to Harbor Vault. Verify your fingerprint or device security to unlock');
       if (!authorized) {
         if (mounted) setState(() => _unlockError =
           'Unable to verify. Please try again with fingerprint, supported face unlock, or your phone screen lock.');
         return; // Fail closed; do not load recovery data.
       }
+      // Never reveal wallet content after the app has moved to the background.
+      if (!_foreground) return;
       final phrase = await _storage.getPhrase();
       if (phrase == null) throw StateError('No encrypted phrase was found.');
       final derived = WalletEngine.derive(phrase);
@@ -420,12 +429,14 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
         'The encrypted wallet could not be opened. Check your device security settings and try again.');
       // Avoid displaying internal storage errors and wallet details on lock UI.
     } finally {
+      _unlockCoordinator.finished();
       if (mounted) setState(() => _saving = false);
     }
   }
 
   void _lock() {
     _idleLockTimer?.cancel();
+    _unlockCoordinator.lockedLocally();
     if (_page != _Page.wallet) return;
     // Prevent modal dialogs or bottom sheets from covering the locked screen.
     final navigator = Navigator.maybeOf(context, rootNavigator: true);
@@ -770,7 +781,8 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
       behavior: HitTestBehavior.translucent,
       onPointerDown: (_) => _recordUserActivity(),
       child: Scaffold(
-      appBar: AppBar(
+      // Do not display app navigation or alerts over the locked welcome view.
+      appBar: _page == _Page.locked ? null : AppBar(
         title: GestureDetector(onTap: _closeNotifications, behavior: HitTestBehavior.opaque,
           child: Row(mainAxisSize: MainAxisSize.min, children: [
           Container(width: 32, height: 32, alignment: Alignment.center,
@@ -856,27 +868,47 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
   Widget _onboarding() {
     if (_page == _Page.loading) return const Center(child: CircularProgressIndicator());
     if (_page == _Page.locked) return Column(
-      mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch,
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        const Icon(Icons.fingerprint, size: 76, color: _mint),
-        const SizedBox(height: 24),
-        const Text('Welcome back!', textAlign: TextAlign.center,
-          style: TextStyle(fontSize: 30, fontWeight: FontWeight.w900)),
-        const SizedBox(height: 12),
-        const Text('Unlock Harbor Vault with your phone security',
-          textAlign: TextAlign.center, style: TextStyle(color: _muted, fontSize: 16)),
-        const SizedBox(height: 14),
+        Center(child: Container(
+          width: 58, height: 58,
+          decoration: BoxDecoration(color: const Color(0xFF143530),
+            borderRadius: BorderRadius.circular(18)),
+          child: const Icon(Icons.anchor_rounded, color: _mint, size: 32),
+        )),
+        const SizedBox(height: 28),
+        const Text('Welcome back', textAlign: TextAlign.center,
+          style: TextStyle(fontSize: 34, fontWeight: FontWeight.w900)),
+        const SizedBox(height: 10),
+        const Text('Harbor Vault is locked', textAlign: TextAlign.center,
+          style: TextStyle(color: _muted, fontSize: 16)),
+        const SizedBox(height: 32),
+        Center(child: Container(
+          width: 138, height: 138,
+          decoration: BoxDecoration(color: _panel, shape: BoxShape.circle,
+            border: Border.all(color: const Color(0xFF2A5755), width: 1.4)),
+          child: const Icon(Icons.fingerprint, size: 84, color: _mint),
+        )),
+        const SizedBox(height: 26),
+        const Text('Verify with your fingerprint, supported face unlock, '
+          'or your phone screen lock to continue.',
+          textAlign: TextAlign.center,
+          style: TextStyle(color: _muted, height: 1.5)),
         if (_unlockError != null) Padding(
-          padding: const EdgeInsets.symmetric(vertical: 8),
+          padding: const EdgeInsets.only(top: 14),
           child: Text(_unlockError!, textAlign: TextAlign.center,
-            style: const TextStyle(color: Colors.redAccent, fontSize: 13))),
-        const SizedBox(height: 24),
+            style: const TextStyle(color: Colors.redAccent, fontSize: 13)),
+        ),
+        const SizedBox(height: 26),
         ElevatedButton.icon(onPressed: _saving ? null : _unlockWallet,
-          icon: const Icon(Icons.fingerprint),
-          label: Text(_saving ? 'Verifying…' : 'Try fingerprint / face / screen lock')),
-        const SizedBox(height: 14),
-        const Text('The wallet remains hidden until Android verifies your identity. Cancel or failed verification never opens the wallet.',
-          textAlign: TextAlign.center, style: TextStyle(color: _muted, fontSize: 12)),
+          icon: const Icon(Icons.lock_open_outlined),
+          label: Text(_saving ? 'Verifying identity…' : 'Unlock Harbor Vault')),
+        const SizedBox(height: 16),
+        const Text('Authentication is requested once on launch. If you '
+          'cancel, tap Unlock to retry.',
+          textAlign: TextAlign.center,
+          style: TextStyle(color: _muted, fontSize: 12, height: 1.5)),
       ],
     );
     if (_page == _Page.error) return Column(mainAxisSize: MainAxisSize.min, children: [
@@ -1261,70 +1293,119 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
 
   Widget _securityView() {
     return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      _pill('NO THIRD-PARTY CUSTODY'),
-      const SizedBox(height: 18),
-      const Text('Security & backup', style: TextStyle(fontSize: 32, fontWeight: FontWeight.w900)),
-      const SizedBox(height: 8),
-      const Text('Your recovery words are the only reliable way to recover this wallet if the device is lost.', style: TextStyle(color: _muted)),
-      const SizedBox(height: 24),
-      Card(margin: EdgeInsets.zero, child: Padding(padding: const EdgeInsets.all(20),
-        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          const ListTile(contentPadding: EdgeInsets.zero, leading: Icon(Icons.shield_outlined, color: _mint),
-              title: Text('100% your keys'), subtitle: Text('No exchange or custodial account. Recovery words stay encrypted on this device; coins remain on their blockchains.')),
-          const Divider(),
-          const ListTile(contentPadding: EdgeInsets.zero, leading: Icon(Icons.lock, color: _mint),
-              title: Text('Encrypted device storage'), subtitle: Text('Uses Flutter Secure Storage, backed by OS protected encryption.')),
-          const Divider(),
-          const ListTile(contentPadding: EdgeInsets.zero, leading: Icon(Icons.gpp_maybe_outlined, color: Colors.orangeAccent),
-              title: Text('Important security limitations'), subtitle: Text('Uses phone PIN/fingerprint to unlock, but memory zeroization, independent audit and hardware-wallet integration are not implemented.')),
-          const Divider(),
-          const ListTile(contentPadding: EdgeInsets.zero,
-              leading: Icon(Icons.fingerprint, color: _mint),
-              title: Text('Fingerprint / Face unlock / phone passcode'),
-              subtitle: Text('Uses Android identity verification. Face authentication depends on your device settings and OS support.')),
-          const Divider(),
+      _pill('PRIVATE · LOCAL SECURITY'),
+      const SizedBox(height: 14),
+      const Text('Security', style: TextStyle(fontSize: 30, fontWeight: FontWeight.w900)),
+      const SizedBox(height: 6),
+      const Text('Your unlock settings, backup and advanced options—organized in one place.',
+        style: TextStyle(color: _muted, height: 1.5)),
+      const SizedBox(height: 20),
+      Card(margin: EdgeInsets.zero, child: ExpansionTile(
+        key: const PageStorageKey('security_unlock'),
+        initiallyExpanded: true,
+        leading: const Icon(Icons.fingerprint, color: _mint),
+        title: const Text('Unlock & auto-lock', style: TextStyle(fontWeight: FontWeight.w800)),
+        subtitle: Text('Device security • $_autoLockMinutes minute inactivity lock',
+          style: const TextStyle(color: _muted, fontSize: 12)),
+        childrenPadding: const EdgeInsets.fromLTRB(17, 0, 17, 18),
+        children: [
+          const Text('The wallet opens to “Welcome back” and requests phone '
+              'authentication only once. A cancelled prompt stays locked until you retry.',
+            style: TextStyle(color: _muted, height: 1.5)),
+          const SizedBox(height: 10),
           ListTile(contentPadding: EdgeInsets.zero,
-              leading: const Icon(Icons.timer_outlined, color: _mint),
-              title: const Text('Auto-lock while using wallet'),
-              subtitle: const Text('Locks after inactivity. Switching away locks immediately.'),
-              trailing: DropdownButton<int>(
-                value: _autoLockMinutes,
-                onChanged: (value) { if (value != null) _updateAutoLockMinutes(value); },
-                items: AutoLockPolicy.options.map((minutes) => DropdownMenuItem<int>(
-                  value: minutes, child: Text('$minutes min'),
-                )).toList(),
-              )),
-          const Divider(),
-          const ListTile(contentPadding: EdgeInsets.zero, leading: Icon(Icons.public, color: Colors.lightBlueAccent),
-              title: Text('Public balance checks'), subtitle: Text('On wallet open, every 5 minutes while foregrounded, and when Refresh is tapped, public addresses go to blockchain providers. USD market quotes come from CoinGecko. No recovery words are sent.')),
-          const SizedBox(height: 12),
-          OutlinedButton.icon(onPressed: _showRecoveryPhrase,
-              icon: const Icon(Icons.visibility_outlined), label: const Text('Reveal recovery words'),
-              style: OutlinedButton.styleFrom(minimumSize: const Size.fromHeight(49))),
-          const SizedBox(height: 8),
-          OutlinedButton.icon(onPressed: _verifyOfflineBackup,
-              icon: const Icon(Icons.fact_check_outlined),
-              label: Text(_backupVerified ? 'Backup verified · Check again' : 'Verify offline backup'),
-              style: OutlinedButton.styleFrom(minimumSize: const Size.fromHeight(49))),
-          const SizedBox(height: 8),
+            leading: const Icon(Icons.timer_outlined, color: _mint),
+            title: const Text('Auto-lock timer'),
+            subtitle: const Text('Locks immediately when sent to background'),
+            trailing: DropdownButton<int>(
+              value: _autoLockMinutes,
+              onChanged: (value) { if (value != null) _updateAutoLockMinutes(value); },
+              items: AutoLockPolicy.options.map((n) => DropdownMenuItem<int>(
+                value: n, child: Text('$n min'))).toList(),
+            )),
           OutlinedButton.icon(onPressed: _lock, icon: const Icon(Icons.lock_clock),
-              label: const Text('Lock wallet now'),
-              style: OutlinedButton.styleFrom(minimumSize: const Size.fromHeight(49))),
-        ]))),
-      const SizedBox(height: 20),
-      const Text('Standard derivation paths', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-      const SizedBox(height: 10),
-      ...ChainAsset.values.where((a) => a != ChainAsset.usdt && a != ChainAsset.usdtTrc20).map((a) =>
-        Padding(padding: const EdgeInsets.symmetric(vertical: 5), child: Row(children: [
-          SizedBox(width: 80, child: Text(a.symbol, style: const TextStyle(color: _mint))),
-          SelectableText(a.path, style: const TextStyle(color: _muted)),
-        ]))),
-      const SizedBox(height: 24),
-      OutlinedButton.icon(onPressed: _deleteWallet, icon: const Icon(Icons.delete_outline, color: Colors.redAccent),
-        label: const Text('Delete wallet from this device', style: TextStyle(color: Colors.redAccent)),
-        style: OutlinedButton.styleFrom(minimumSize: const Size.fromHeight(50))),
-      const SizedBox(height: 20),
-      const Text('About Harbor Vault • Version 1.3.0 (personal beta)\nSending remains disabled pending audits and on-chain test transfers. Keep an offline recovery backup.', style: TextStyle(color: _muted, fontSize: 11)),
+            label: const Text('Lock wallet now'),
+            style: OutlinedButton.styleFrom(minimumSize: const Size.fromHeight(48))),
+        ],
+      )),
+      const SizedBox(height: 12),
+      Card(margin: EdgeInsets.zero, child: ExpansionTile(
+        key: const PageStorageKey('security_backup'),
+        leading: const Icon(Icons.shield_outlined, color: _mint),
+        title: const Text('Backup & recovery', style: TextStyle(fontWeight: FontWeight.w800)),
+        subtitle: Text(_backupVerified ? 'Offline backup check completed' : 'Offline backup needs verification',
+          style: const TextStyle(color: _muted, fontSize: 12)),
+        childrenPadding: const EdgeInsets.fromLTRB(17, 0, 17, 18),
+        children: [
+          const Text('Recovery words are needed if this phone is lost. Never '
+            'enter them into a website or share them with anyone.',
+            style: TextStyle(color: _muted, height: 1.5)),
+          const SizedBox(height: 12),
+          OutlinedButton.icon(onPressed: _verifyOfflineBackup,
+            icon: const Icon(Icons.fact_check_outlined),
+            label: Text(_backupVerified ? 'Verify backup again' : 'Verify offline backup'),
+            style: OutlinedButton.styleFrom(minimumSize: const Size.fromHeight(48))),
+          const SizedBox(height: 8),
+          OutlinedButton.icon(onPressed: _showRecoveryPhrase,
+            icon: const Icon(Icons.visibility_outlined),
+            label: const Text('Reveal recovery words securely'),
+            style: OutlinedButton.styleFrom(minimumSize: const Size.fromHeight(48))),
+        ],
+      )),
+      const SizedBox(height: 12),
+      Card(margin: EdgeInsets.zero, child: ExpansionTile(
+        key: const PageStorageKey('security_privacy'),
+        leading: const Icon(Icons.privacy_tip_outlined, color: _mint),
+        title: const Text('Privacy & network checks', style: TextStyle(fontWeight: FontWeight.w800)),
+        subtitle: const Text('Encrypted device storage • Public data providers',
+          style: TextStyle(color: _muted, fontSize: 12)),
+        childrenPadding: const EdgeInsets.fromLTRB(17, 0, 17, 18),
+        children: const [
+          Text('Wallet recovery words are stored using Flutter Secure Storage. '
+            'Public receiving addresses are shared with blockchain balance/history '
+            'services when you refresh; market quotes are fetched separately. '
+            'These providers can correlate address lookups. Private recovery words '
+            'are never submitted to them.',
+            style: TextStyle(color: _muted, height: 1.6)),
+        ],
+      )),
+      const SizedBox(height: 12),
+      Card(margin: EdgeInsets.zero, child: ExpansionTile(
+        key: const PageStorageKey('security_advanced'),
+        leading: const Icon(Icons.settings_outlined, color: _mint),
+        title: const Text('Advanced & about', style: TextStyle(fontWeight: FontWeight.w800)),
+        subtitle: const Text('Recovery paths, limitations and device reset',
+          style: TextStyle(color: _muted, fontSize: 12)),
+        childrenPadding: const EdgeInsets.fromLTRB(17, 0, 17, 18),
+        children: [
+          const Text('Version 1.4.0 • Personal beta • Sending is disabled. '
+            'This is unaudited software, not suitable for real funds.',
+            style: TextStyle(color: _muted, height: 1.5)),
+          const SizedBox(height: 12),
+          const Text('Derivation paths',
+            style: TextStyle(fontWeight: FontWeight.w800)),
+          const SizedBox(height: 10),
+          ...ChainAsset.values.where((a) =>
+            a != ChainAsset.usdt && a != ChainAsset.usdtTrc20).map((a) =>
+              Padding(padding: const EdgeInsets.symmetric(vertical: 4),
+                child: Row(children: [
+                  SizedBox(width: 80, child: Text(a.symbol,
+                    style: const TextStyle(color: _mint))),
+                  Expanded(child: SelectableText(a.path,
+                    style: const TextStyle(color: _muted, fontSize: 12))),
+                ]))),
+          const SizedBox(height: 12),
+          const Text('Independent key/recovery/signing security testing, '
+            'multi-address discovery and hardware-wallet support are not yet complete.',
+            style: TextStyle(color: Colors.orangeAccent, height: 1.5)),
+          const SizedBox(height: 14),
+          OutlinedButton.icon(onPressed: _deleteWallet,
+            icon: const Icon(Icons.delete_outline, color: Colors.redAccent),
+            label: const Text('Delete wallet from this device',
+              style: TextStyle(color: Colors.redAccent)),
+            style: OutlinedButton.styleFrom(minimumSize: const Size.fromHeight(48))),
+        ],
+      )),
     ]);
   }
 
